@@ -9,7 +9,7 @@ const ACTIVE_STATUSES = ['READY', 'IN_PROGRESS', 'RESERVED'];
 
 export async function getLiveSnapshot(sessionId: string, userId: string) {
   const access = await getSessionAccess(sessionId, userId);
-  const [queue, matches, sessionCourts, rotation, registrationCounts] = await Promise.all([
+  const [queue, matches, sessionCourts, rotation] = await Promise.all([
     queueSnapshot(sessionId, userId),
     prisma.match.findMany({
       where: { sessionId, status: { in: ACTIVE_STATUSES } },
@@ -22,7 +22,6 @@ export async function getLiveSnapshot(sessionId: string, userId: string) {
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     }),
     getLatestRotation(sessionId, userId),
-    prisma.sessionRegistration.count({ where: { sessionId, status: 'CHECKED_IN' } }),
   ]);
 
   const matchesByCourt = new Map(matches.map((match) => [match.courtId, match]));
@@ -44,7 +43,8 @@ export async function getLiveSnapshot(sessionId: string, userId: string) {
       {
         counts: {
           registered: queue.counts.registered,
-          checkedIn: registrationCounts,
+          checkedIn: queue.counts.checkedIn,
+          guests: queue.counts.guests,
           waiting: queue.counts.waiting,
           playing: queue.counts.playing,
           pending: queue.counts.pending,

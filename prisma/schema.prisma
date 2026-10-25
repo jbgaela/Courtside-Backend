@@ -12,42 +12,63 @@ datasource db {
 }
 
 model User {
-  id              String   @id @default(auto()) @map("_id") @db.ObjectId
-  email           String   @unique
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  email           String    @unique
   passwordHash    String
   name            String
   emailVerifiedAt DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  platformRole    String    @default("USER")
+  accountStatus   String    @default("ACTIVE")
+  activatedAt     DateTime?
+  deletedAt       DateTime?
+  termsAcceptedAt DateTime?
+  sessionVersion  Int       @default(0)
+  mfaEnabled      Boolean   @default(false)
+  mfaSecret       String?
+  mfaEnrolledAt   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   profile               PlayerProfile?
   authSessions          AuthSession[]
   emailTokens           EmailToken[]
+  registrationReview    RegistrationReview?
+  registrationSessions  RegistrationSession[]
+  mfaChallenges         MfaChallenge[]
+  accountClaimTokens    AccountClaimToken[]
+  accountRecoveryTokens AccountRecoveryToken[]
+  reviewedRegistrations RegistrationReview[]       @relation("RegistrationReviewer")
   memberships           ClubMembership[]
-  ownedClubs            Club[]              @relation("ClubOwner")
-  createdInvitations    ClubInvitation[]    @relation("InvitationCreator")
-  acceptedInvitations   ClubInvitation[]    @relation("InvitationAccepted")
-  createdSessions       PlaySession[]       @relation("SessionCreator")
+  ownedClubs            Club[]                     @relation("ClubOwner")
+  createdInvitations    ClubInvitation[]           @relation("InvitationCreator")
+  acceptedInvitations   ClubInvitation[]           @relation("InvitationAccepted")
+  createdSessions       PlaySession[]              @relation("SessionCreator")
   sessionRegistrations  SessionRegistration[]
   queueEntries          QueueEntry[]
   skillRatings          SkillRating[]
   matchParticipants     MatchParticipant[]
   scoreEvents           ScoreEvent[]
-  auditEvents           AuditEvent[]        @relation("AuditActor")
+  auditEvents           AuditEvent[]               @relation("AuditActor")
+  adminAuditEvents      AdministrativeAuditEvent[] @relation("AdminAuditActor")
+  adminAuditTargets     AdministrativeAuditEvent[] @relation("AdminAuditTarget")
   notifications         Notification[]
+  createdGuests         SessionGuest[]             @relation("GuestCreator")
 
   @@index([emailVerifiedAt])
+  @@index([platformRole, accountStatus])
+  @@index([accountStatus, createdAt])
+  @@index([deletedAt])
 }
 
 model PlayerProfile {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  userId       String   @unique @db.ObjectId
-  displayName  String
-  skillRating  Float    @default(3.0)
-  bio          String?
-  avatarColor  String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String   @unique @db.ObjectId
+  displayName String
+  skillRating Float    @default(3.0)
+  bio         String?
+  avatarColor String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
@@ -55,16 +76,17 @@ model PlayerProfile {
 }
 
 model AuthSession {
-  id         String    @id @default(auto()) @map("_id") @db.ObjectId
-  userId     String    @db.ObjectId
-  tokenHash  String    @unique
-  csrfToken  String
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  lastUsedAt DateTime  @default(now())
-  ip         String?
-  userAgent  String?
-  createdAt  DateTime  @default(now())
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String    @db.ObjectId
+  tokenHash         String    @unique
+  csrfToken         String
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  lastUsedAt        DateTime  @default(now())
+  reauthenticatedAt DateTime?
+  ip                String?
+  userAgent         String?
+  createdAt         DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -100,29 +122,30 @@ model Club {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  owner       User             @relation("ClubOwner", fields: [ownerId], references: [id])
-  memberships ClubMembership[]
-  invitations ClubInvitation[]
-  courts      Court[]
-  playSessions PlaySession[]
-  assignments CourtAssignment[]
-  matches      Match[]
-  auditEvents AuditEvent[]
+  owner         User              @relation("ClubOwner", fields: [ownerId], references: [id])
+  memberships   ClubMembership[]
+  invitations   ClubInvitation[]
+  courts        Court[]
+  playSessions  PlaySession[]
+  sessionGuests SessionGuest[]
+  assignments   CourtAssignment[]
+  matches       Match[]
+  auditEvents   AuditEvent[]
 
   @@index([archivedAt])
   @@index([name])
 }
 
 model ClubMembership {
-  id         String    @id @default(auto()) @map("_id") @db.ObjectId
-  clubId     String    @db.ObjectId
-  userId     String    @db.ObjectId
-  role       String
-  status     String
-  joinedAt   DateTime?
-  invitedById String?  @db.ObjectId
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  clubId      String    @db.ObjectId
+  userId      String    @db.ObjectId
+  role        String
+  status      String
+  joinedAt    DateTime?
+  invitedById String?   @db.ObjectId
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   club Club @relation(fields: [clubId], references: [id])
   user User @relation(fields: [userId], references: [id])
@@ -145,8 +168,8 @@ model ClubInvitation {
   acceptedAt   DateTime?
   createdAt    DateTime  @default(now())
 
-  club       Club @relation(fields: [clubId], references: [id])
-  invitedBy  User @relation("InvitationCreator", fields: [invitedById], references: [id])
+  club       Club  @relation(fields: [clubId], references: [id])
+  invitedBy  User  @relation("InvitationCreator", fields: [invitedById], references: [id])
   acceptedBy User? @relation("InvitationAccepted", fields: [acceptedById], references: [id])
 
   @@index([clubId, status, createdAt])
@@ -163,7 +186,7 @@ model Court {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  club          Club             @relation(fields: [clubId], references: [id])
+  club          Club              @relation(fields: [clubId], references: [id])
   sessionCourts SessionCourt[]
   assignments   CourtAssignment[]
   matches       Match[]
@@ -202,15 +225,16 @@ model PlaySession {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  club         Club @relation(fields: [clubId], references: [id])
-  createdBy    User @relation("SessionCreator", fields: [createdById], references: [id])
+  club          Club                  @relation(fields: [clubId], references: [id])
+  createdBy     User                  @relation("SessionCreator", fields: [createdById], references: [id])
   sessionCourts SessionCourt[]
   registrations SessionRegistration[]
-  queueEntries QueueEntry[]
-  rotations    RotationRun[]
-  assignments  CourtAssignment[]
-  matches      Match[]
-  auditEvents  AuditEvent[]
+  guests        SessionGuest[]
+  queueEntries  QueueEntry[]
+  rotations     RotationRun[]
+  assignments   CourtAssignment[]
+  matches       Match[]
+  auditEvents   AuditEvent[]
 
   @@index([clubId, status, startsAt])
   @@index([clubId, startsAt])
@@ -234,18 +258,18 @@ model SessionCourt {
 }
 
 model SessionRegistration {
-  id             String    @id @default(auto()) @map("_id") @db.ObjectId
-  sessionId      String    @db.ObjectId
-  userId         String    @db.ObjectId
-  status         String
-  registeredAt   DateTime  @default(now())
-  respondedAt    DateTime?
-  approvedById   String?   @db.ObjectId
-  checkedInAt    DateTime?
-  checkInMethod  String?
-  notes          String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId     String    @db.ObjectId
+  userId        String    @db.ObjectId
+  status        String
+  registeredAt  DateTime  @default(now())
+  respondedAt   DateTime?
+  approvedById  String?   @db.ObjectId
+  checkedInAt   DateTime?
+  checkInMethod String?
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   session PlaySession @relation(fields: [sessionId], references: [id])
   user    User        @relation(fields: [userId], references: [id])
@@ -255,32 +279,63 @@ model SessionRegistration {
   @@index([userId, status])
 }
 
+model SessionGuest {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId   String    @db.ObjectId
+  clubId      String    @db.ObjectId
+  displayName String
+  gender      String
+  skillRating Float
+  status      String    @default("ACTIVE")
+  version     Int       @default(1)
+  createdById String    @db.ObjectId
+  removedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  session           PlaySession        @relation(fields: [sessionId], references: [id])
+  club              Club               @relation(fields: [clubId], references: [id])
+  createdBy         User               @relation("GuestCreator", fields: [createdById], references: [id])
+  queueEntries      QueueEntry[]
+  matchParticipants MatchParticipant[]
+
+  @@index([sessionId, status, displayName])
+  @@index([clubId, createdAt])
+  @@index([createdById, createdAt])
+}
+
 model QueueEntry {
-  id               String    @id @default(auto()) @map("_id") @db.ObjectId
-  sessionId        String    @db.ObjectId
-  userId           String    @db.ObjectId
-  state            String
-  position         Int?
-  waitingSince     DateTime
-  accumulatedWaitMs Int      @default(0)
-  gamesPlayed      Int       @default(0)
-  wins             Int       @default(0)
-  losses           Int       @default(0)
-  lastPlayedAt     DateTime?
-  restUntil        DateTime?
-  currentMatchId   String?   @db.ObjectId
-  pausedAt         DateTime?
-  joinedAt         DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  version          Int       @default(1)
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId         String    @db.ObjectId
+  participantId     String
+  participantType   String    @default("REGISTERED")
+  userId            String?   @db.ObjectId
+  guestId           String?   @db.ObjectId
+  state             String
+  position          Int?
+  waitingSince      DateTime
+  accumulatedWaitMs Int       @default(0)
+  gamesPlayed       Int       @default(0)
+  wins              Int       @default(0)
+  losses            Int       @default(0)
+  lastPlayedAt      DateTime?
+  restUntil         DateTime?
+  currentMatchId    String?   @db.ObjectId
+  pausedAt          DateTime?
+  joinedAt          DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  version           Int       @default(1)
 
-  session PlaySession @relation(fields: [sessionId], references: [id])
-  user    User        @relation(fields: [userId], references: [id])
+  session PlaySession   @relation(fields: [sessionId], references: [id])
+  user    User?         @relation(fields: [userId], references: [id])
+  guest   SessionGuest? @relation(fields: [guestId], references: [id])
 
-  @@unique([sessionId, userId])
+  @@unique([sessionId, participantId])
   @@index([sessionId, state, gamesPlayed, waitingSince])
   @@index([currentMatchId])
   @@index([sessionId, state, waitingSince])
+  @@index([userId, state])
+  @@index([guestId, state])
 }
 
 model RotationRun {
@@ -302,7 +357,7 @@ model RotationRun {
   supersededAt   DateTime?
   createdAt      DateTime  @default(now())
 
-  session     PlaySession      @relation(fields: [sessionId], references: [id])
+  session     PlaySession       @relation(fields: [sessionId], references: [id])
   assignments CourtAssignment[]
 
   @@index([sessionId, status, createdAt])
@@ -310,24 +365,24 @@ model RotationRun {
 }
 
 model CourtAssignment {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  rotationId   String   @db.ObjectId
-  sessionId    String   @db.ObjectId
-  clubId       String   @db.ObjectId
-  courtId      String   @db.ObjectId
-  matchId      String?  @db.ObjectId
-  status       String
-  teamA        Json
-  teamB        Json
-  teamRatingA  Float
-  teamRatingB  Float
-  teamBalance  Float
-  skillSpread  Float
-  reasons      Json
-  warnings     Json
-  cost         Float
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  rotationId  String   @db.ObjectId
+  sessionId   String   @db.ObjectId
+  clubId      String   @db.ObjectId
+  courtId     String   @db.ObjectId
+  matchId     String?  @db.ObjectId
+  status      String
+  teamA       Json
+  teamB       Json
+  teamRatingA Float
+  teamRatingB Float
+  teamBalance Float
+  skillSpread Float
+  reasons     Json
+  warnings    Json
+  cost        Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   rotation RotationRun @relation(fields: [rotationId], references: [id])
   session  PlaySession @relation(fields: [sessionId], references: [id])
@@ -342,45 +397,45 @@ model CourtAssignment {
 }
 
 model Match {
-  id                String    @id @default(auto()) @map("_id") @db.ObjectId
-  sessionId         String    @db.ObjectId
-  clubId            String    @db.ObjectId
-  courtId           String    @db.ObjectId
-  rotationId        String?   @db.ObjectId
-  assignmentId      String?   @db.ObjectId
-  publicId          String    @unique
-  round             Int
-  format            String
-  status            String
-  scoringMode       String
-  targetScore       Int
-  winByTwo          Boolean
-  pointCap          Int?
-  bestOf            Int
-  games             Json
-  gamesWonA         Int       @default(0)
-  gamesWonB         Int       @default(0)
-  winnerTeam        String?
-  servingTeam       String?
-  teamAScore        Int       @default(0)
-  teamBScore        Int       @default(0)
-  awaitingCompletion Boolean  @default(false)
-  version           Int       @default(1)
-  scorekeeperId     String?   @db.ObjectId
-  configSnapshot    Json
-  startedAt         DateTime?
-  completedAt       DateTime?
-  correctedAt       DateTime?
-  correctionReason  String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id                 String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId          String    @db.ObjectId
+  clubId             String    @db.ObjectId
+  courtId            String    @db.ObjectId
+  rotationId         String?   @db.ObjectId
+  assignmentId       String?   @db.ObjectId
+  publicId           String    @unique
+  round              Int
+  format             String
+  status             String
+  scoringMode        String
+  targetScore        Int
+  winByTwo           Boolean
+  pointCap           Int?
+  bestOf             Int
+  games              Json
+  gamesWonA          Int       @default(0)
+  gamesWonB          Int       @default(0)
+  winnerTeam         String?
+  servingTeam        String?
+  teamAScore         Int       @default(0)
+  teamBScore         Int       @default(0)
+  awaitingCompletion Boolean   @default(false)
+  version            Int       @default(1)
+  scorekeeperId      String?   @db.ObjectId
+  configSnapshot     Json
+  startedAt          DateTime?
+  completedAt        DateTime?
+  correctedAt        DateTime?
+  correctionReason   String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  session         PlaySession       @relation(fields: [sessionId], references: [id])
-  club            Club              @relation(fields: [clubId], references: [id])
-  court           Court             @relation(fields: [courtId], references: [id])
-  participants    MatchParticipant[]
-  scoreEvents     ScoreEvent[]
-  result          MatchResult?
+  session          PlaySession        @relation(fields: [sessionId], references: [id])
+  club             Club               @relation(fields: [clubId], references: [id])
+  court            Court              @relation(fields: [courtId], references: [id])
+  participants     MatchParticipant[]
+  scoreEvents      ScoreEvent[]
+  result           MatchResult?
   courtAssignments CourtAssignment[]
 
   @@index([sessionId, status, round])
@@ -390,33 +445,38 @@ model Match {
 }
 
 model MatchParticipant {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  matchId      String   @db.ObjectId
-  userId       String   @db.ObjectId
-  team         String
-  position     Int
-  displayName  String
-  skillRating  Float
-  createdAt    DateTime @default(now())
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  matchId         String   @db.ObjectId
+  participantId   String
+  participantType String   @default("REGISTERED")
+  userId          String?  @db.ObjectId
+  guestId         String?  @db.ObjectId
+  team            String
+  position        Int
+  displayName     String
+  skillRating     Float
+  createdAt       DateTime @default(now())
 
-  match Match @relation(fields: [matchId], references: [id])
-  user  User  @relation(fields: [userId], references: [id])
+  match Match         @relation(fields: [matchId], references: [id])
+  user  User?         @relation(fields: [userId], references: [id])
+  guest SessionGuest? @relation(fields: [guestId], references: [id])
 
-  @@unique([matchId, userId])
+  @@unique([matchId, participantId])
   @@index([userId, createdAt])
+  @@index([guestId, createdAt])
 }
 
 model ScoreEvent {
-  id          String   @id @default(auto()) @map("_id") @db.ObjectId
-  matchId     String   @db.ObjectId
-  sequence    Int
-  type        String
-  team        String?
-  points      Int      @default(0)
-  scoreAfter  Json
-  actorId     String   @db.ObjectId
-  reason      String?
-  createdAt   DateTime @default(now())
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  matchId    String   @db.ObjectId
+  sequence   Int
+  type       String
+  team       String?
+  points     Int      @default(0)
+  scoreAfter Json
+  actorId    String   @db.ObjectId
+  reason     String?
+  createdAt  DateTime @default(now())
 
   match Match @relation(fields: [matchId], references: [id])
   actor User  @relation(fields: [actorId], references: [id])
@@ -426,15 +486,15 @@ model ScoreEvent {
 }
 
 model MatchResult {
-  id               String   @id @default(auto()) @map("_id") @db.ObjectId
-  matchId          String   @unique @db.ObjectId
-  sessionId        String   @db.ObjectId
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+  matchId          String    @unique @db.ObjectId
+  sessionId        String    @db.ObjectId
   winnerTeam       String
   gamesWonA        Int
   gamesWonB        Int
   games            Json
   completedAt      DateTime
-  recordedById     String   @db.ObjectId
+  recordedById     String    @db.ObjectId
   correctedAt      DateTime?
   correctionReason String?
 
@@ -498,17 +558,121 @@ model AuditEvent {
 }
 
 model IdempotencyRecord {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  key          String
-  userId       String   @db.ObjectId
-  endpoint     String
-  requestHash  String
-  status       String
-  statusCode   Int?
-  response     Json?
-  createdAt    DateTime @default(now())
-  expiresAt    DateTime
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String
+  userId      String   @db.ObjectId
+  endpoint    String
+  requestHash String
+  status      String
+  statusCode  Int?
+  response    Json?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
 
   @@unique([key, userId])
   @@index([expiresAt])
+}
+
+model RegistrationReview {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId         String    @unique @db.ObjectId
+  status         String
+  version        Int       @default(1)
+  submittedAt    DateTime  @default(now())
+  reviewedAt     DateTime?
+  reviewedById   String?   @db.ObjectId
+  internalReason String?
+  publicReason   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user       User  @relation(fields: [userId], references: [id])
+  reviewedBy User? @relation("RegistrationReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, submittedAt])
+  @@index([reviewedById, reviewedAt])
+}
+
+model RegistrationSession {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  tokenHash String   @unique
+  csrfToken String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+}
+
+model MfaChallenge {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  purpose    String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+model AccountClaimToken {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String    @db.ObjectId
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdById String?   @db.ObjectId
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+model AccountRecoveryToken {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String    @db.ObjectId
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  revokedAt   DateTime?
+  createdById String?   @db.ObjectId
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+model AdministrativeAuditEvent {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  actorId      String?  @db.ObjectId
+  targetUserId String?  @db.ObjectId
+  action       String
+  outcome      String
+  entityType   String?
+  entityId     String?
+  summary      String
+  metadata     Json?
+  requestId    String?
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  actor  User? @relation("AdminAuditActor", fields: [actorId], references: [id])
+  target User? @relation("AdminAuditTarget", fields: [targetUserId], references: [id])
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@index([action, createdAt])
 }

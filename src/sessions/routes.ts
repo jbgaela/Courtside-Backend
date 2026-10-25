@@ -6,8 +6,10 @@ import { param } from '../http/params.js';
 import { validateBody, validateQuery } from '../http/validate.js';
 import { requestMetadata } from '../http/middleware/request-id.js';
 import { rotationPreviewRateLimit } from '../http/middleware/rate-limit.js';
+import { withIdempotency } from '../http/idempotency.js';
 import {
   checkInSchema,
+  createGuestSchema,
   createSessionSchema,
   publishSchema,
   qrCheckInSchema,
@@ -18,6 +20,7 @@ import {
   sessionIdParamsSchema,
   sessionListQuerySchema,
   transitionSchema,
+  updateGuestSchema,
   updateSessionSchema,
 } from './schemas.js';
 import {
@@ -41,6 +44,7 @@ import {
   registrationAction,
   setQueuePaused,
 } from './participants.js';
+import { createGuest, enqueueGuest, removeGuest, updateGuest } from './guests.js';
 import {
   cancelPreview,
   commitRotation,
@@ -253,6 +257,83 @@ sessionsRouter.patch(
         requestMetadata(req),
       ),
     );
+  }),
+);
+
+sessionsRouter.post(
+  '/:sessionId/guests',
+  authenticated,
+  emailVerified,
+  validateBody(createGuestSchema),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const sessionId = param(req, 'sessionId');
+    const key = req.get('idempotency-key') ?? null;
+    const result = await withIdempotency({
+      userId: auth.user.id,
+      key,
+      endpoint: `POST /sessions/${sessionId}/guests`,
+      request: req.body,
+      action: async () => ({
+        data: await createGuest(sessionId, auth.user.id, req.body, requestMetadata(req)),
+        statusCode: 201,
+      }),
+    });
+    sendData(res, result.data, result.statusCode);
+  }),
+);
+
+sessionsRouter.patch(
+  '/:sessionId/guests/:guestId',
+  authenticated,
+  emailVerified,
+  validateBody(updateGuestSchema),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    sendData(
+      res,
+      await updateGuest(
+        param(req, 'sessionId'),
+        auth.user.id,
+        param(req, 'guestId'),
+        req.body,
+        requestMetadata(req),
+      ),
+    );
+  }),
+);
+
+sessionsRouter.delete(
+  '/:sessionId/guests/:guestId',
+  authenticated,
+  emailVerified,
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    sendData(
+      res,
+      await removeGuest(
+        param(req, 'sessionId'),
+        auth.user.id,
+        param(req, 'guestId'),
+        requestMetadata(req),
+      ),
+    );
+  }),
+);
+
+sessionsRouter.post(
+  '/:sessionId/guests/:guestId/enqueue',
+  authenticated,
+  emailVerified,
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const result = await enqueueGuest(
+      param(req, 'sessionId'),
+      auth.user.id,
+      param(req, 'guestId'),
+      requestMetadata(req),
+    );
+    sendData(res, result, result.alreadyQueued ? 200 : 201);
   }),
 );
 

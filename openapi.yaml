@@ -5,9 +5,16 @@ info:
   description: |
     PickleQueue is a pickleball club management and automated queuing API.
 
-    **Authentication** uses an HTTP-only session cookie set by `/auth/login` or
-    `/auth/register`. Authenticated mutations also require the `X-CSRF-Token`
-    header returned by `/auth/me`, `/auth/login` and `/auth/register`.
+    **Authentication** uses an HTTP-only session cookie set by `/auth/login`.
+    Public registration creates a pending account and no normal session; the
+    applicant checks status through a short-lived restricted registration
+    ticket. Approved applicants activate without email. Authenticated mutations
+    also require the `X-CSRF-Token` header returned by `/auth/me`,
+    `/auth/login` and `/auth/registration-status`.
+
+    **Platform administration** is a separate `SUPER_ADMIN` role. Club roles
+    never grant platform account-management access. Sensitive administrative
+    actions require recent password reauthentication.
 
     **Concurrency** is protected by optimistic versions on sessions, matches,
     rotation runs and queue entries. Critical mutations accept an
@@ -29,13 +36,15 @@ tags:
   - name: Matchmaking
   - name: Matches & Scoring
   - name: Public
+  - name: Admin
   - name: Health
 
 paths:
   /auth/register:
     post:
       tags: [Auth]
-      summary: Create an account
+      summary: Submit a pending registration
+      description: Creates a pending user and registration review. No normal session is issued.
       security: []
       requestBody:
         required: true
@@ -43,35 +52,38 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, email, password]
+              additionalProperties: false
+              required: [name, email, password, acceptTerms]
               properties:
                 name: { type: string, minLength: 2, maxLength: 80 }
                 email: { type: string, format: email }
                 password: { type: string, minLength: 8, maxLength: 128 }
+                skillRating: { type: number, minimum: 1, maximum: 7 }
+                acceptTerms: { type: boolean, const: true }
       responses:
         '201':
-          description: Account created and session cookie set
-          headers:
-            Set-Cookie: { schema: { type: string } }
+          description: Registration submitted for administrator approval
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   data:
-                    allOf:
-                      - $ref: '#/components/schemas/AuthResponse'
-                      - type: object
+                    type: object
+                    properties:
+                      submitted: { type: boolean }
+                      approvalRequired: { type: boolean }
+                      status: { type: string, enum: [PENDING_APPROVAL] }
+                      user:
+                        type: object
                         properties:
-                          devVerificationToken:
-                            type: [string, 'null']
-                            description: Present only when EXPOSE_DEV_TOKENS=true.
-        '409': { $ref: '#/components/responses/Conflict' }
+                          name: { type: string }
+                          email: { type: string }
         '422': { $ref: '#/components/responses/ValidationError' }
   /auth/login:
     post:
       tags: [Auth]
-      summary: Sign in
+      summary: Sign in or obtain a restricted registration-status ticket
       security: []
       requestBody:
         required: true
@@ -85,14 +97,187 @@ paths:
                 password: { type: string }
       responses:
         '200':
-          description: Session cookie set
+          description: Normal session or restricted registration ticket
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AuthResponse'
+                  - $ref: '#/components/schemas/RestrictedAuthResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /auth/registration-status:
+    get:
+      tags: [Auth]
+      summary: Check the current applicant's registration status
+      security:
+        - registrationCookie: []
+      responses:
+        '200':
+          description: Restricted status and activation eligibility
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RegistrationStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/activate:
+    post:
+      tags: [Auth]
+      summary: Activate an approved account without email
+      security:
+        - registrationCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [acceptTerms]
+              properties:
+                displayName: { type: string, maxLength: 50 }
+                skillRating: { type: number, minimum: 1, maximum: 7 }
+                acceptTerms: { type: boolean, const: true }
+      responses:
+        '200':
+          description: Account activated and normal session issued
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   data: { $ref: '#/components/schemas/AuthResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /auth/registration-logout:
+    post:
+      tags: [Auth]
+      summary: Clear the restricted registration ticket
+      security: []
+      responses:
+        '200': { description: Cleared }
+  /auth/reauth:
+    post:
+      tags: [Auth]
+      summary: Recently reauthenticate an administrator session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        '200': { description: Reauthenticated }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/mfa/setup:
+    post:
+      tags: [Auth]
+      summary: Start TOTP enrollment for a Super Admin
+      description: Accepts a normal Super Admin session or a short-lived MFA setup ticket.
+      security: []
+      responses:
+        '200':
+          description: One-time enrollment secret and authenticator URI
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/MfaSetupResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /auth/mfa/enable:
+    post:
+      tags: [Auth]
+      summary: Verify a TOTP code and enable MFA
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: MFA enabled; a normal session is issued when using a setup ticket
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/mfa/verify:
+    post:
+      tags: [Auth]
+      summary: Complete a Super Admin MFA login challenge
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: MFA verified and normal session issued
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/mfa/status:
+    get:
+      tags: [Auth]
+      summary: Get MFA status for the current Super Admin
+      responses:
+        '200': { description: MFA status }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /auth/claim:
+    post:
+      tags: [Auth]
+      summary: Redeem a one-time administratively created account claim
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password, acceptTerms]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+                displayName: { type: string, maxLength: 50 }
+                acceptTerms: { type: boolean, const: true }
+      responses:
+        '200':
+          description: Account activated and normal session issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /auth/recover:
+    post:
+      tags: [Auth]
+      summary: Redeem a one-time administrator-issued recovery credential
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: Password changed and sessions revoked }
+        '400': { $ref: '#/components/responses/BadRequest' }
   /auth/logout:
     post:
       tags: [Auth]
@@ -605,11 +790,14 @@ paths:
   /sessions/{sessionId}/registrations:
     get:
       tags: [Check-in & Queue]
-      summary: Registration board (club admins)
+      summary: Participant board (club admins)
+      description: |
+        Returns registered players, active guests and a merged participant list.
+        The legacy `registrations` array remains registered-player-only.
       parameters:
         - $ref: '#/components/parameters/SessionId'
       responses:
-        '200': { description: Registrations, counts and capacity }
+        '200': { description: Registrations, guests, merged participants, counts and capacity }
   /sessions/{sessionId}/registrations/{registrationId}:
     patch:
       tags: [Check-in & Queue]
@@ -632,6 +820,81 @@ paths:
                 reason: { type: string, maxLength: 300 }
       responses:
         '200': { description: Updated registration }
+  /sessions/{sessionId}/guests:
+    post:
+      tags: [Check-in & Queue]
+      summary: Add a guest player (Queue Master)
+      description: |
+        Creates a session-scoped participant without an account. Requires
+        name, gender and the existing 1-7 skill rating. `addToQueue` creates the
+        queue entry in the same transaction. Supports an `Idempotency-Key`
+        header so a retried submission cannot create two guests.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, minLength: 8, maxLength: 100 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGuestRequest' }
+      responses:
+        '201': { description: Guest created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Session full, closed or late arrivals disabled }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /sessions/{sessionId}/guests/{guestId}:
+    patch:
+      tags: [Check-in & Queue]
+      summary: Edit a guest player (Queue Master)
+      description: |
+        Skill changes are rejected while the guest is in an active match. Match
+        history keeps its name and skill snapshots.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: guestId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateGuestRequest' }
+      responses:
+        '200': { description: Guest updated }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Active match restriction or stale version }
+    delete:
+      tags: [Check-in & Queue]
+      summary: Remove a guest player (Queue Master)
+      description: Soft-removes the guest and ends queue participation. Repeating the request is safe.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: guestId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Guest removed }
+        '409': { description: Guest is in an active match }
+  /sessions/{sessionId}/guests/{guestId}/enqueue:
+    post:
+      tags: [Check-in & Queue]
+      summary: Add a guest to the active queue (Queue Master)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: guestId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '201': { description: Guest queued }
+        '200': { description: Guest was already queued }
+        '409': { description: Guest removed, session closed or active match }
   /sessions/{sessionId}/checkins:
     post:
       tags: [Check-in & Queue]
@@ -680,7 +943,8 @@ paths:
             schema:
               type: object
               properties:
-                userId: { type: string }
+                userId: { type: string, description: Registered player user id }
+                participantId: { type: string, description: User id or guest id }
                 reason: { type: string }
       responses:
         '200': { description: Paused }
@@ -690,6 +954,15 @@ paths:
       summary: Resume queue participation with prior wait preserved
       parameters:
         - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, description: Registered player user id }
+                participantId: { type: string, description: User id or guest id }
+                reason: { type: string }
       responses:
         '200': { description: Resumed }
   /sessions/{sessionId}/leave:
@@ -698,6 +971,15 @@ paths:
       summary: Leave the session (not while playing)
       parameters:
         - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, description: Registered player user id }
+                participantId: { type: string, description: User id or guest id }
+                reason: { type: string }
       responses:
         '200': { description: Left }
         '409': { description: Active match }
@@ -959,12 +1241,304 @@ paths:
         '200': { description: Public club }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /admin/overview:
+    get:
+      tags: [Admin]
+      summary: Platform overview and pending review summary
+      responses:
+        '200': { description: Overview }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/registrations:
+    get:
+      tags: [Admin]
+      summary: List registration reviews with pagination and search
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [PENDING, APPROVED, REJECTED] }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200': { description: Registration review page }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/registrations/{registrationId}:
+    parameters:
+      - name: registrationId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Admin]
+      summary: Registration review detail
+      responses:
+        '200': { description: Registration review detail }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/registrations/{registrationId}/approve:
+    parameters:
+      - name: registrationId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Approve a pending registration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer, minimum: 1 }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        '200': { description: Approved registration }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/registrations/{registrationId}/reject:
+    parameters:
+      - name: registrationId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Reject a pending registration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer, minimum: 1 }
+                internalReason: { type: string, maxLength: 1000 }
+                publicReason: { type: string, maxLength: 500 }
+      responses:
+        '200': { description: Rejected registration }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/registrations/{registrationId}/reopen:
+    parameters:
+      - name: registrationId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Reopen a rejected registration for review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer, minimum: 1 }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        '200': { description: Reopened registration }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: Server-side user directory
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200': { description: User page }
+    post:
+      tags: [Admin]
+      summary: Create an approved account with a one-time claim credential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, email]
+              properties:
+                name: { type: string, maxLength: 80 }
+                email: { type: string, format: email }
+                displayName: { type: string, maxLength: 50 }
+                skillRating: { type: number, minimum: 1, maximum: 7 }
+                note: { type: string, maxLength: 1000 }
+      responses:
+        '201': { description: Account created; claim token returned once }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/users/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Admin]
+      summary: Account detail and audit history
+      responses:
+        '200': { description: Account detail }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update allowlisted profile fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, maxLength: 80 }
+                displayName: { type: string, maxLength: 50 }
+                skillRating: { type: number, minimum: 1, maximum: 7 }
+                bio: { type: [string, 'null'], maxLength: 300 }
+                avatarColor: { type: [string, 'null'], pattern: '^#[0-9a-fA-F]{6}$' }
+      responses:
+        '200': { description: Updated account }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Soft-delete an account after recent reauthentication
+      responses:
+        '200': { description: Account soft-deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/users/{userId}/suspend:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Suspend an account and revoke sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        '200': { description: Account suspended }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users/{userId}/reactivate:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Reactivate a suspended account
+      responses:
+        '200': { description: Account reactivated }
+  /admin/users/{userId}/restore:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Restore a soft-deleted account without restoring old sessions
+      responses:
+        '200': { description: Account restored }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users/{userId}/recovery:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Generate a single-use no-SMTP recovery credential
+      responses:
+        '200': { description: Recovery credential returned once }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users/{userId}/claim:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Regenerate a one-time account claim credential
+      responses:
+        '200': { description: Claim credential returned once }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/users/{userId}/revoke-sessions:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Admin]
+      summary: Revoke all account and registration sessions
+      responses:
+        '200': { description: Sessions revoked }
+  /admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: Administrative audit history
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: action
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 30 }
+      responses:
+        '200': { description: Audit page }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
 components:
   securitySchemes:
     sessionCookie:
       type: apiKey
       in: cookie
       name: pq_session
+    registrationCookie:
+      type: apiKey
+      in: cookie
+      name: pq_registration
+    mfaCookie:
+      type: apiKey
+      in: cookie
+      name: pq_mfa
     csrfToken:
       type: apiKey
       in: header
@@ -1010,6 +1584,39 @@ components:
         user: { $ref: '#/components/schemas/Me' }
         csrfToken: { type: string }
         expiresAt: { type: string, format: date-time }
+    MfaSetupResponse:
+      type: object
+      properties:
+        secret: { type: string }
+        otpauthUri: { type: string }
+    RestrictedAuthResponse:
+      type: object
+      properties:
+        restricted: { type: boolean, const: true }
+        status:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, REJECTED]
+        registration: { $ref: '#/components/schemas/RegistrationStatus' }
+        csrfToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+    RegistrationStatus:
+      type: object
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        accountStatus:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+        registrationStatus:
+          type: [string, 'null']
+          enum: [PENDING, APPROVED, REJECTED, null]
+        submittedAt: { type: [string, 'null'], format: date-time }
+        reviewedAt: { type: [string, 'null'], format: date-time }
+        publicReason: { type: [string, 'null'] }
+        canActivate: { type: boolean }
+        restricted: { type: boolean }
+        csrfToken: { type: string }
+        expiresAt: { type: string, format: date-time }
     Me:
       type: object
       properties:
@@ -1017,6 +1624,11 @@ components:
         email: { type: string, format: email }
         name: { type: string }
         emailVerified: { type: boolean }
+        platformRole: { type: string, enum: [USER, SUPER_ADMIN] }
+        accountStatus:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+        activatedAt: { type: [string, 'null'], format: date-time }
         profile:
           type: object
           nullable: true
@@ -1067,6 +1679,39 @@ components:
         winByTwo: { type: boolean }
         pointCap: { type: [integer, 'null'] }
         bestOf: { type: integer, enum: [1, 3] }
+    GuestPlayer:
+      type: object
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        displayName: { type: string }
+        name: { type: string }
+        gender: { type: string, enum: [FEMALE, MALE, NON_BINARY, PREFER_NOT_TO_SAY] }
+        skillRating: { type: number, minimum: 1, maximum: 7 }
+        participantType: { type: string, enum: [GUEST] }
+        participantId: { type: string }
+        status: { type: string, enum: [ACTIVE, REMOVED] }
+        version: { type: integer }
+        createdById: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        removedAt: { type: [string, 'null'], format: date-time }
+        queueState: { type: [string, 'null'] }
+    CreateGuestRequest:
+      type: object
+      required: [displayName, gender, skillRating]
+      properties:
+        displayName: { type: string, minLength: 1, maxLength: 80 }
+        gender: { type: string, enum: [FEMALE, MALE, NON_BINARY, PREFER_NOT_TO_SAY] }
+        skillRating: { type: number, minimum: 1, maximum: 7, multipleOf: 0.25 }
+        addToQueue: { type: boolean, default: false }
+    UpdateGuestRequest:
+      type: object
+      properties:
+        displayName: { type: string, minLength: 1, maxLength: 80 }
+        gender: { type: string, enum: [FEMALE, MALE, NON_BINARY, PREFER_NOT_TO_SAY] }
+        skillRating: { type: number, minimum: 1, maximum: 7, multipleOf: 0.25 }
+        expectedVersion: { type: integer, minimum: 1 }
     QueueSnapshot:
       type: object
       properties:
@@ -1076,6 +1721,8 @@ components:
           type: object
           properties:
             checkedIn: { type: integer }
+            registered: { type: integer }
+            guests: { type: integer }
             waiting: { type: integer }
             playing: { type: integer }
             paused: { type: integer }
@@ -1085,7 +1732,11 @@ components:
           items:
             type: object
             properties:
-              userId: { type: string }
+              participantId: { type: string }
+              participantType: { type: string, enum: [REGISTERED, GUEST] }
+              userId: { type: [string, 'null'] }
+              guestId: { type: [string, 'null'] }
+              gender: { type: [string, 'null'] }
               displayName: { type: string }
               skillRating: { type: number }
               state: { type: string }
@@ -1126,7 +1777,9 @@ components:
     SelectedPlayer:
       type: object
       properties:
-        userId: { type: string }
+        queueEntryId: { type: string }
+        userId: { type: string, description: Participant id (user id or guest id) }
+        participantType: { type: string, enum: [REGISTERED, GUEST] }
         displayName: { type: string }
         skill: { type: number }
         gamesPlayed: { type: integer }

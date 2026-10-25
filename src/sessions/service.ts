@@ -14,6 +14,7 @@ import { writeAudit } from '../audit/audit.js';
 import { getClubAccess, getClubForAdmin } from '../clubs/access.js';
 import { getSessionAccess, getSessionForAdmin } from './access.js';
 import { sessionDto } from './serializers.js';
+import { countActiveGuests, countActiveParticipants } from './guests.js';
 import { publishSessionEvent, revokePublicRoom } from '../realtime/gateway.js';
 
 interface AuditMeta {
@@ -24,6 +25,7 @@ interface AuditMeta {
 interface SessionCounts {
   registered: number;
   checkedIn: number;
+  guests: number;
   waiting: number;
   playing: number;
   pending: number;
@@ -31,7 +33,7 @@ interface SessionCounts {
 }
 
 async function countsForSession(sessionId: string): Promise<SessionCounts> {
-  const [registrations, queue, courts] = await Promise.all([
+  const [registrations, queue, courts, guests] = await Promise.all([
     prisma.sessionRegistration.groupBy({
       by: ['status'],
       where: { sessionId },
@@ -43,12 +45,14 @@ async function countsForSession(sessionId: string): Promise<SessionCounts> {
       _count: { _all: true },
     }),
     prisma.sessionCourt.count({ where: { sessionId, active: true } }),
+    countActiveGuests(sessionId),
   ]);
   const regMap = new Map(registrations.map((row) => [row.status, row._count._all]));
   const queueMap = new Map(queue.map((row) => [row.state, row._count._all]));
   return {
     registered: regMap.get('REGISTERED') ?? 0,
-    checkedIn: regMap.get('CHECKED_IN') ?? 0,
+    checkedIn: (regMap.get('CHECKED_IN') ?? 0) + guests,
+    guests,
     pending: regMap.get('PENDING') ?? 0,
     waiting: queueMap.get('WAITING') ?? 0,
     playing: queueMap.get('PLAYING') ?? 0,
@@ -191,32 +195,39 @@ export async function listSessions(
   const ids = sessions.map((session) => session.id);
   if (ids.length === 0) return [];
 
-  const [registrations, queue, courts, viewerRegistrations, viewerQueue] = await Promise.all([
-    prisma.sessionRegistration.groupBy({
-      by: ['sessionId', 'status'],
-      where: { sessionId: { in: ids } },
-      _count: { _all: true },
-    }),
-    prisma.queueEntry.groupBy({
-      by: ['sessionId', 'state'],
-      where: { sessionId: { in: ids } },
-      _count: { _all: true },
-    }),
-    prisma.sessionCourt.findMany({
-      where: { sessionId: { in: ids }, active: true },
-      include: { court: true },
-      orderBy: { sortOrder: 'asc' },
-    }),
-    prisma.sessionRegistration.findMany({
-      where: { sessionId: { in: ids }, userId },
-    }),
-    prisma.queueEntry.findMany({
-      where: { sessionId: { in: ids }, userId },
-    }),
-  ]);
+  const [registrations, queue, courts, viewerRegistrations, viewerQueue, sessionGuests] =
+    await Promise.all([
+      prisma.sessionRegistration.groupBy({
+        by: ['sessionId', 'status'],
+        where: { sessionId: { in: ids } },
+        _count: { _all: true },
+      }),
+      prisma.queueEntry.groupBy({
+        by: ['sessionId', 'state'],
+        where: { sessionId: { in: ids } },
+        _count: { _all: true },
+      }),
+      prisma.sessionCourt.findMany({
+        where: { sessionId: { in: ids }, active: true },
+        include: { court: true },
+        orderBy: { sortOrder: 'asc' },
+      }),
+      prisma.sessionRegistration.findMany({
+        where: { sessionId: { in: ids }, userId },
+      }),
+      prisma.queueEntry.findMany({
+        where: { sessionId: { in: ids }, participantId: userId },
+      }),
+      prisma.sessionGuest.groupBy({
+        by: ['sessionId'],
+        where: { sessionId: { in: ids }, status: 'ACTIVE' },
+        _count: { _all: true },
+      }),
+    ]);
 
   const regCount = new Map<string, number>();
   const checkedCount = new Map<string, number>();
+  const guestCount = new Map<string, number>();
   const waitingCount = new Map<string, number>();
   const playingCount = new Map<string, number>();
   const pendingCount = new Map<string, number>();
@@ -225,6 +236,10 @@ export async function listSessions(
     if (row.status === 'REGISTERED') regCount.set(key, row._count._all);
     if (row.status === 'CHECKED_IN') checkedCount.set(key, row._count._all);
     if (row.status === 'PENDING') pendingCount.set(key, row._count._all);
+  }
+  for (const row of sessionGuests) {
+    guestCount.set(row.sessionId, row._count._all);
+    checkedCount.set(row.sessionId, (checkedCount.get(row.sessionId) ?? 0) + row._count._all);
   }
   for (const row of queue) {
     if (row.state === 'WAITING' || row.state === 'RESTING') {
@@ -261,6 +276,7 @@ export async function listSessions(
         counts: {
           registered: regCount.get(session.id) ?? 0,
           checkedIn: checkedCount.get(session.id) ?? 0,
+          guests: guestCount.get(session.id) ?? 0,
           waiting: waitingCount.get(session.id) ?? 0,
           playing: playingCount.get(session.id) ?? 0,
           pending: pendingCount.get(session.id) ?? 0,
@@ -281,7 +297,7 @@ export async function getSessionDetail(sessionId: string, userId: string) {
       where: { sessionId_userId: { sessionId, userId } },
     }),
     prisma.queueEntry.findUnique({
-      where: { sessionId_userId: { sessionId, userId } },
+      where: { sessionId_participantId: { sessionId, participantId: userId } },
     }),
   ]);
   return sessionDto(
@@ -329,11 +345,11 @@ export async function updateSession(
   if (endsAt <= startsAt) throw AppError.badRequest('End time must be after start time');
 
   if (input.capacity !== undefined) {
-    const active = await prisma.sessionRegistration.count({
-      where: { sessionId, status: { in: ['PENDING', 'REGISTERED', 'CHECKED_IN'] } },
-    });
+    const active = await countActiveParticipants(sessionId);
     if (input.capacity < active) {
-      throw AppError.conflict(`Capacity cannot be below the ${active} current registrations`);
+      throw AppError.conflict(
+        `Capacity cannot be below the ${active} current participants (registered and guests)`,
+      );
     }
   }
 
@@ -477,9 +493,10 @@ export async function transitionSession(
   }
 
   if (input.status === 'LIVE') {
-    const checkedIn = await prisma.sessionRegistration.count({
-      where: { sessionId, status: 'CHECKED_IN' },
-    });
+    const checkedIn =
+      (await prisma.sessionRegistration.count({
+        where: { sessionId, status: 'CHECKED_IN' },
+      })) + (await countActiveGuests(sessionId));
     const minimum = session.format === 'SINGLES' ? 2 : 4;
     if (checkedIn < minimum) {
       throw AppError.conflict(`At least ${minimum} checked-in players are required to go live`);

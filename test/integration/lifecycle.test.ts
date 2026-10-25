@@ -167,7 +167,9 @@ describe('session lifecycle and queue controls', () => {
 
     await checkIn(owner, session.id, player.id);
     const queue = await prisma.queueEntry.findUnique({
-      where: { sessionId_userId: { sessionId: session.id, userId: player.id } },
+      where: {
+        sessionId_participantId: { sessionId: session.id, participantId: player.id },
+      },
     });
     expect(queue?.state).toBe('WAITING');
   });
@@ -201,11 +203,15 @@ describe('session lifecycle and queue controls', () => {
       .expect(200);
 
     const playerEntry = await prisma.queueEntry.findUnique({
-      where: { sessionId_userId: { sessionId: session.id, userId: player.id } },
+      where: {
+        sessionId_participantId: { sessionId: session.id, participantId: player.id },
+      },
     });
     expect(playerEntry?.state).toBe('WAITING');
     const outsiderEntry = await prisma.queueEntry.findUnique({
-      where: { sessionId_userId: { sessionId: session.id, userId: outsider.id } },
+      where: {
+        sessionId_participantId: { sessionId: session.id, participantId: outsider.id },
+      },
     });
     expect(outsiderEntry).toBeNull();
   });

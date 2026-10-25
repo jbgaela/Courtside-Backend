@@ -13,7 +13,14 @@ export function matchDto(
   const games = (match.games as unknown as GameScore[]) ?? [];
   const current = games[games.length - 1] ?? { a: 0, b: 0 };
   const mapPlayer = (participant: MatchParticipant) => ({
-    ...(options.publicView ? {} : { userId: participant.userId }),
+    ...(options.publicView
+      ? {}
+      : {
+          participantId: participant.participantId,
+          participantType: participant.participantType,
+          userId: participant.userId,
+          guestId: participant.guestId,
+        }),
     name: options.publicView
       ? toPublicDisplayName(participant.displayName)
       : participant.displayName,

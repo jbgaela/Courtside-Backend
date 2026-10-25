@@ -4,7 +4,8 @@ import { prisma } from '../infrastructure/prisma.js';
 import { writeAudit } from '../audit/audit.js';
 import { publishSessionEvent } from '../realtime/gateway.js';
 import { getSessionAccess, getSessionByCheckInToken, getSessionForAdmin } from './access.js';
-import { registrationDto } from './serializers.js';
+import { guestParticipantDto, registrationDto } from './serializers.js';
+import { countActiveGuests, countActiveParticipants } from './guests.js';
 import type { Request } from 'express';
 import { requestMetadata } from '../http/middleware/request-id.js';
 
@@ -17,17 +18,16 @@ function isAdminRole(role: string): boolean {
   return role === 'OWNER' || role === 'QUEUE_MASTER';
 }
 
-async function activeRegistrationCount(sessionId: string): Promise<number> {
-  return prisma.sessionRegistration.count({
-    where: { sessionId, status: { in: ['PENDING', 'REGISTERED', 'CHECKED_IN'] } },
-  });
+async function activeParticipantCount(sessionId: string): Promise<number> {
+  return countActiveParticipants(sessionId);
 }
 
 async function ensureClubMember(sessionClubId: string, userId: string) {
   const membership = await prisma.clubMembership.findUnique({
     where: { clubId_userId: { clubId: sessionClubId, userId } },
+    include: { user: { select: { accountStatus: true } } },
   });
-  if (!membership || membership.status !== 'ACTIVE') {
+  if (!membership || membership.status !== 'ACTIVE' || membership.user.accountStatus !== 'ACTIVE') {
     throw AppError.forbidden('The player must be an active club member');
   }
 }
@@ -56,7 +56,7 @@ export async function registerForSession(
   if (existing && ['PENDING', 'REGISTERED', 'CHECKED_IN'].includes(existing.status)) {
     throw AppError.conflict('You are already registered for this session');
   }
-  if ((await activeRegistrationCount(sessionId)) >= session.capacity) {
+  if ((await activeParticipantCount(sessionId)) >= session.capacity) {
     throw AppError.conflict('This session is full');
   }
 
@@ -124,7 +124,7 @@ export async function cancelRegistration(
   });
   if (!registration) throw AppError.notFound('Registration not found');
   const queue = await prisma.queueEntry.findUnique({
-    where: { sessionId_userId: { sessionId, userId } },
+    where: { sessionId_participantId: { sessionId, participantId: userId } },
   });
   if (queue && ['PLAYING', 'RESERVED'].includes(queue.state)) {
     throw AppError.conflict('A player in an active match cannot be removed');
@@ -171,26 +171,49 @@ export async function cancelRegistration(
 
 export async function listRegistrations(sessionId: string, actorId: string) {
   const access = await getSessionForAdmin(sessionId, actorId);
-  const [registrations, queue] = await Promise.all([
+  const [registrations, guests, queue] = await Promise.all([
     prisma.sessionRegistration.findMany({
       where: { sessionId },
       include: { user: { include: { profile: true } } },
       orderBy: [{ status: 'asc' }, { registeredAt: 'asc' }],
       take: 300,
     }),
-    prisma.queueEntry.findMany({ where: { sessionId }, select: { userId: true, state: true } }),
+    prisma.sessionGuest.findMany({
+      where: { sessionId, status: 'ACTIVE' },
+      orderBy: [{ displayName: 'asc' }, { createdAt: 'asc' }],
+      take: 300,
+    }),
+    prisma.queueEntry.findMany({
+      where: { sessionId },
+      select: { participantId: true, state: true },
+    }),
   ]);
   void access;
-  const queueMap = new Map(queue.map((row) => [row.userId, row.state]));
+  const queueMap = new Map(queue.map((row) => [row.participantId, row.state]));
+  const registeredRows = registrations.map((registration) =>
+    registrationDto(registration, queueMap.get(registration.userId) ?? null),
+  );
+  const guestRows = guests.map((guest) =>
+    guestParticipantDto(guest, queueMap.get(guest.id) ?? null),
+  );
+  const counts = registrations.reduce<Record<string, number>>((acc, registration) => {
+    acc[registration.status] = (acc[registration.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  // Guests are active participants even though they do not have a registration
+  // row. Keep the board's checked-in total aligned with the session and queue
+  // counts; the separate `guests` key preserves the breakdown.
+  counts.CHECKED_IN = (counts.CHECKED_IN ?? 0) + guestRows.length;
+  counts.guests = guestRows.length;
+
   return {
     sessionId,
-    registrations: registrations.map((registration) =>
-      registrationDto(registration, queueMap.get(registration.userId) ?? null),
+    registrations: registeredRows,
+    guests: guestRows,
+    participants: [...registeredRows, ...guestRows].sort((a, b) =>
+      a.displayName.localeCompare(b.displayName),
     ),
-    counts: registrations.reduce<Record<string, number>>((acc, registration) => {
-      acc[registration.status] = (acc[registration.status] ?? 0) + 1;
-      return acc;
-    }, {}),
+    counts,
     capacity: access.session.capacity,
   };
 }
@@ -214,21 +237,15 @@ export async function registrationAction(
     if (registration.status !== 'PENDING') {
       throw AppError.conflict('Only pending registrations can be approved');
     }
-    const activeExcludingTarget = await prisma.sessionRegistration.count({
-      where: {
-        sessionId,
-        id: { not: registration.id },
-        status: { in: ['PENDING', 'REGISTERED', 'CHECKED_IN'] },
-      },
-    });
-    if (activeExcludingTarget >= access.session.capacity) {
+    const activeIncludingTarget = await countActiveParticipants(sessionId);
+    if (activeIncludingTarget - 1 >= access.session.capacity) {
       throw AppError.conflict('This session is full');
     }
   }
 
   const status = action === 'APPROVE' ? 'REGISTERED' : action === 'REJECT' ? 'REJECTED' : 'NO_SHOW';
   const queue = await prisma.queueEntry.findUnique({
-    where: { sessionId_userId: { sessionId, userId: registration.userId } },
+    where: { sessionId_participantId: { sessionId, participantId: registration.userId } },
   });
   if (queue && ['PLAYING', 'RESERVED'].includes(queue.state) && action === 'NO_SHOW') {
     throw AppError.conflict('A player in an active match cannot be marked as a no-show');
@@ -309,9 +326,12 @@ export async function checkInPlayer(
     where: { sessionId_userId: { sessionId, userId: targetUserId } },
     include: { user: { include: { profile: true } } },
   });
+  // Registered players keep their registration-based eligibility. Guests are
+  // created and checked in through the guest endpoints instead.
+
   if (!registration) {
     if (!isAdmin) throw AppError.badRequest('Register for this session before checking in');
-    if ((await activeRegistrationCount(sessionId)) >= access.session.capacity) {
+    if ((await activeParticipantCount(sessionId)) >= access.session.capacity) {
       throw AppError.conflict('This session is full');
     }
     registration = await prisma.sessionRegistration.create({
@@ -336,7 +356,7 @@ export async function checkInPlayer(
   }
 
   const existingQueue = await prisma.queueEntry.findUnique({
-    where: { sessionId_userId: { sessionId, userId: targetUserId } },
+    where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
   });
   if (registration.status === 'CHECKED_IN' && existingQueue && existingQueue.state !== 'LEFT') {
     return {
@@ -359,7 +379,7 @@ export async function checkInPlayer(
       include: { user: { include: { profile: true } } },
     });
     const queue = await tx.queueEntry.upsert({
-      where: { sessionId_userId: { sessionId, userId: targetUserId } },
+      where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
       update: {
         state: 'WAITING',
         waitingSince: now,
@@ -371,6 +391,8 @@ export async function checkInPlayer(
       },
       create: {
         sessionId,
+        participantId: targetUserId,
+        participantType: 'REGISTERED',
         userId: targetUserId,
         state: 'WAITING',
         waitingSince: now,
@@ -434,10 +456,10 @@ async function bumpVersion(sessionId: string): Promise<number> {
 
 export async function queueSnapshot(sessionId: string, userId: string) {
   const access = await getSessionAccess(sessionId, userId);
-  const [entries, registrations, activeCourts] = await Promise.all([
+  const [entries, registrations, activeCourts, guests] = await Promise.all([
     prisma.queueEntry.findMany({
       where: { sessionId, state: { not: 'LEFT' } },
-      include: { user: { include: { profile: true } } },
+      include: { user: { include: { profile: true } }, guest: true },
       orderBy: [{ gamesPlayed: 'asc' }, { waitingSince: 'asc' }],
     }),
     prisma.sessionRegistration.groupBy({
@@ -446,6 +468,7 @@ export async function queueSnapshot(sessionId: string, userId: string) {
       _count: { _all: true },
     }),
     prisma.sessionCourt.count({ where: { sessionId, active: true } }),
+    countActiveGuests(sessionId),
   ]);
 
   const stateOrder: Record<string, number> = {
@@ -468,11 +491,20 @@ export async function queueSnapshot(sessionId: string, userId: string) {
   const queue = sorted.map((entry) => {
     const waitingMinutes = Math.max(0, Math.round((now - entry.waitingSince.getTime()) / 60_000));
     if (entry.state === 'WAITING') waitingPosition += 1;
+    const guest = entry.guest;
+    const displayName = guest
+      ? guest.displayName
+      : (entry.user?.profile?.displayName ?? entry.user?.name ?? 'Unknown player');
+    const skillRating = guest ? guest.skillRating : (entry.user?.profile?.skillRating ?? 3);
     return {
       id: entry.id,
+      participantId: entry.participantId,
+      participantType: entry.participantType,
       userId: entry.userId,
-      displayName: entry.user.profile?.displayName ?? entry.user.name,
-      skillRating: entry.user.profile?.skillRating ?? 3,
+      guestId: entry.guestId,
+      gender: guest?.gender ?? null,
+      displayName,
+      skillRating,
       state: entry.state,
       gamesPlayed: entry.gamesPlayed,
       wins: entry.wins,
@@ -500,15 +532,16 @@ export async function queueSnapshot(sessionId: string, userId: string) {
     format: access.session.format,
     courts: activeCourts,
     counts: {
-      checkedIn: registrationCounts.CHECKED_IN ?? 0,
+      checkedIn: (registrationCounts.CHECKED_IN ?? 0) + guests,
       registered: registrationCounts.REGISTERED ?? 0,
       pending: registrationCounts.PENDING ?? 0,
+      guests,
       waiting: queue.filter((entry) => entry.state === 'WAITING').length,
       playing: queue.filter((entry) => entry.state === 'PLAYING').length,
       paused: queue.filter((entry) => entry.state === 'PAUSED').length,
     },
     queue,
-    self: queue.find((entry) => entry.userId === userId) ?? null,
+    self: queue.find((entry) => entry.participantId === userId) ?? null,
     viewerRole: access.membership.role,
   };
 }
@@ -516,22 +549,22 @@ export async function queueSnapshot(sessionId: string, userId: string) {
 export async function setQueuePaused(
   sessionId: string,
   actorId: string,
-  input: { userId?: string; reason?: string },
+  input: { userId?: string; participantId?: string; reason?: string },
   paused: boolean,
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
   const isAdmin = isAdminRole(access.membership.role);
-  const targetUserId = input.userId ?? actorId;
-  if (targetUserId !== actorId && !isAdmin) {
+  const targetParticipantId = input.participantId ?? input.userId ?? actorId;
+  if (targetParticipantId !== actorId && !isAdmin) {
     throw AppError.forbidden('You can only change your own queue state');
   }
   if (['COMPLETED', 'CANCELLED', 'DRAFT'].includes(access.session.status)) {
     throw AppError.conflict('The queue is not active');
   }
   const entry = await prisma.queueEntry.findUnique({
-    where: { sessionId_userId: { sessionId, userId: targetUserId } },
-    include: { user: { include: { profile: true } } },
+    where: { sessionId_participantId: { sessionId, participantId: targetParticipantId } },
+    include: { user: { include: { profile: true } }, guest: true },
   });
   if (!entry) throw AppError.notFound('Queue entry not found');
   if (['PLAYING', 'RESERVED', 'LEFT'].includes(entry.state)) {
@@ -573,10 +606,13 @@ export async function setQueuePaused(
       action: paused ? 'queue.paused' : 'queue.resumed',
       entityType: 'QueueEntry',
       entityId: entry.id,
-      summary: `${entry.user.profile?.displayName ?? entry.user.name} ${paused ? 'paused' : 'resumed'} queue participation`,
+      summary: `${entry.guest?.displayName ?? entry.user?.profile?.displayName ?? entry.user?.name ?? 'Player'} ${paused ? 'paused' : 'resumed'} queue participation`,
       metadata: {
-        targetUserId,
-        override: targetUserId !== actorId,
+        targetParticipantId,
+        participantType: entry.participantType,
+        targetUserId: entry.userId,
+        guestId: entry.guestId,
+        override: targetParticipantId !== actorId,
         reason: input.reason ?? null,
         accumulatedWaitMs: accumulated,
       },
@@ -590,7 +626,12 @@ export async function setQueuePaused(
     publicId: access.session.publicId,
     type: 'queue.availability_changed',
     version,
-    payload: { userId: targetUserId, state },
+    payload: {
+      participantId: targetParticipantId,
+      userId: entry.userId,
+      guestId: entry.guestId,
+      state,
+    },
   });
   return { state, version };
 }
@@ -598,18 +639,18 @@ export async function setQueuePaused(
 export async function leaveSession(
   sessionId: string,
   actorId: string,
-  input: { userId?: string; reason?: string },
+  input: { userId?: string; participantId?: string; reason?: string },
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
   const isAdmin = isAdminRole(access.membership.role);
-  const targetUserId = input.userId ?? actorId;
-  if (targetUserId !== actorId && !isAdmin) {
+  const targetParticipantId = input.participantId ?? input.userId ?? actorId;
+  if (targetParticipantId !== actorId && !isAdmin) {
     throw AppError.forbidden('You can only leave for yourself');
   }
   const entry = await prisma.queueEntry.findUnique({
-    where: { sessionId_userId: { sessionId, userId: targetUserId } },
-    include: { user: { include: { profile: true } } },
+    where: { sessionId_participantId: { sessionId, participantId: targetParticipantId } },
+    include: { user: { include: { profile: true } }, guest: true },
   });
   if (!entry) throw AppError.notFound('Queue entry not found');
   if (['PLAYING', 'RESERVED'].includes(entry.state)) {
@@ -620,10 +661,18 @@ export async function leaveSession(
       where: { id: entry.id },
       data: { state: 'LEFT', currentMatchId: null, version: { increment: 1 } },
     });
-    await tx.sessionRegistration.updateMany({
-      where: { sessionId, userId: targetUserId },
-      data: { status: 'WITHDRAWN' },
-    });
+    if (entry.userId) {
+      await tx.sessionRegistration.updateMany({
+        where: { sessionId, userId: entry.userId },
+        data: { status: 'WITHDRAWN' },
+      });
+    }
+    if (entry.guestId) {
+      await tx.sessionGuest.updateMany({
+        where: { id: entry.guestId, sessionId, status: 'ACTIVE' },
+        data: { status: 'REMOVED', removedAt: new Date(), version: { increment: 1 } },
+      });
+    }
     const session = await tx.playSession.update({
       where: { id: sessionId },
       data: { version: { increment: 1 } },
@@ -636,8 +685,15 @@ export async function leaveSession(
       action: isAdmin ? 'queue.player_removed' : 'queue.left',
       entityType: 'QueueEntry',
       entityId: entry.id,
-      summary: `${entry.user.profile?.displayName ?? entry.user.name} left the session`,
-      metadata: { targetUserId, reason: input.reason ?? null, override: targetUserId !== actorId },
+      summary: `${entry.guest?.displayName ?? entry.user?.profile?.displayName ?? entry.user?.name ?? 'Player'} left the session`,
+      metadata: {
+        targetParticipantId,
+        participantType: entry.participantType,
+        targetUserId: entry.userId,
+        guestId: entry.guestId,
+        reason: input.reason ?? null,
+        override: targetParticipantId !== actorId,
+      },
       ip: meta.ip,
       userAgent: meta.userAgent,
     });
@@ -648,7 +704,11 @@ export async function leaveSession(
     publicId: access.session.publicId,
     type: 'queue.updated',
     version,
-    payload: { userId: targetUserId },
+    payload: {
+      participantId: targetParticipantId,
+      userId: entry.userId,
+      guestId: entry.guestId,
+    },
   });
   return { left: true, version };
 }

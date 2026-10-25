@@ -351,11 +351,11 @@ export async function completeMatch(
     const queueEntries = await tx.queueEntry.findMany({
       where: {
         sessionId: match.sessionId,
-        userId: { in: match.participants.map((p) => p.userId) },
+        participantId: { in: match.participants.map((p) => p.participantId) },
       },
     });
     for (const participant of match.participants) {
-      const entry = queueEntries.find((row) => row.userId === participant.userId);
+      const entry = queueEntries.find((row) => row.participantId === participant.participantId);
       if (!entry) continue;
       const won = participant.team === result.winnerTeam;
       const keepPaused = entry.state === 'PAUSED';
@@ -597,11 +597,11 @@ export async function correctMatch(
       const entries = await tx.queueEntry.findMany({
         where: {
           sessionId: match.sessionId,
-          userId: { in: match.participants.map((p) => p.userId) },
+          participantId: { in: match.participants.map((p) => p.participantId) },
         },
       });
       for (const participant of match.participants) {
-        const entry = entries.find((row) => row.userId === participant.userId);
+        const entry = entries.find((row) => row.participantId === participant.participantId);
         if (!entry) continue;
         if (participant.team === oldWinner) {
           await tx.queueEntry.update({

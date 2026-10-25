@@ -18,6 +18,11 @@
     "security:ratelimit": "node scripts/security-rate-limit.mjs",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
+    "db:migrate:accounts": "tsx scripts/migrate-account-lifecycle.ts",
+    "db:migrate:guests": "tsx scripts/migrate-guest-participants.ts",
+    "admin:bootstrap": "tsx scripts/bootstrap-super-admin.ts",
+    "admin:promote": "tsx scripts/provision-super-admin.ts",
+    "admin:reset-mfa": "tsx scripts/reset-super-admin-mfa.ts",
     "db:seed": "tsx prisma/seed.ts",
     "db:verify": "tsx scripts/verify-db.ts",
     "format": "prettier --write ."

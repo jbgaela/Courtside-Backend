@@ -19,7 +19,7 @@ afterAll(async () => {
 });
 
 describe('authentication and authorization', () => {
-  it('registers, verifies, logs in and returns CSRF-protected sessions', async () => {
+  it('logs in an active account and returns CSRF-protected sessions', async () => {
     const user = await registerUser('auth');
     const me = await user.agent.get('/api/v1/auth/me').expect(200);
     const meData = me.body.data as { email: string; emailVerified: boolean; csrfToken: string };
@@ -50,32 +50,26 @@ describe('authentication and authorization', () => {
     expect(blocked.body.error.code).toBe('FORBIDDEN');
   });
 
-  it('requires a verified email for privileged creation', async () => {
+  it('does not issue a normal session to a pending registration', async () => {
     const agent = request.agent(app);
-    const email = `unverified.${Date.now()}@example.test`;
+    const email = `pending.${Date.now()}@example.test`;
     const register = await agent
       .post('/api/v1/auth/register')
-      .send({ name: 'Unverified Player', email, password: PASSWORD })
+      .send({ name: 'Pending Player', email, password: PASSWORD, acceptTerms: true })
       .expect(201);
-    const csrf = register.body.data.csrfToken as string;
-    const blocked = await agent
-      .post('/api/v1/clubs')
-      .set('x-csrf-token', csrf)
-      .send({ name: 'Should Not Exist' })
-      .expect(403);
-    expect(blocked.body.error.message).toMatch(/verify/i);
+    expect(register.headers['set-cookie']).toBeUndefined();
+    await agent.get('/api/v1/auth/me').expect(401);
 
-    const token = register.body.data.devVerificationToken as string;
-    await agent
-      .post('/api/v1/auth/verify-email')
-      .set('x-csrf-token', csrf)
-      .send({ token })
+    const login = await agent
+      .post('/api/v1/auth/login')
+      .send({ email, password: PASSWORD })
       .expect(200);
-    await agent
-      .post('/api/v1/clubs')
-      .set('x-csrf-token', csrf)
-      .send({ name: `Verified Club ${Date.now()}` })
-      .expect(201);
+    expect(login.body.data.restricted).toBe(true);
+    expect(login.body.data.status).toBe('PENDING_APPROVAL');
+    expect(String(login.headers['set-cookie'] ?? '')).toContain('pq_registration');
+    await agent.get('/api/v1/auth/me').expect(401);
+    await agent.get('/api/v1/auth/registration-status').expect(200);
+    await agent.get('/api/v1/users/me/profile').expect(401);
   });
 
   it('scopes club administration and prevents cross-club access', async () => {

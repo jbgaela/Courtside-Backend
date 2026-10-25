@@ -1,0 +1,50 @@
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: picklequeue-mongo
+    command: ['mongod', '--replSet', 'rs0', '--bind_ip_all', '--port', '27017']
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'mongosh --quiet --host localhost:27017 --eval "try { rs.status().ok } catch (e) { 0 }" | grep -q 1',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  mongo-init:
+    image: mongo:7.0
+    container_name: picklequeue-mongo-init
+    depends_on:
+      mongo:
+        condition: service_started
+    restart: 'no'
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        until mongosh --quiet --host mongo:27017 --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; do sleep 1; done
+        mongosh --quiet --host mongo:27017 --eval '
+          try {
+            rs.status();
+            print("replica set already initialized");
+          } catch (error) {
+            const result = rs.initiate({
+              _id: "rs0",
+              members: [{ _id: 0, host: "localhost:27017" }]
+            });
+            printjson(result);
+          }
+        '
+        mongosh --quiet --host mongo:27017 --eval 'db.getSiblingDB("picklequeue").createCollection("_health")' >/dev/null 2>&1 || true
+
+volumes:
+  mongo-data:
+    name: picklequeue-mongo-data

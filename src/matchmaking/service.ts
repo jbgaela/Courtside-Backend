@@ -84,6 +84,7 @@ function parseSelectedPlayers(value: Prisma.JsonValue): SelectedPlayer[] {
 const benchEntrySchema = z.object({
   queueEntryId: z.string(),
   userId: z.string(),
+  participantType: z.enum(['REGISTERED', 'GUEST']).optional(),
   displayName: z.string(),
   gamesPlayed: z.number(),
   waitMinutes: z.number(),
@@ -155,7 +156,7 @@ async function loadSnapshot(
   ] = await Promise.all([
     prisma.queueEntry.findMany({
       where: { sessionId: session.id, state: { in: ['WAITING', 'RESTING', 'PAUSED'] } },
-      include: { user: { include: { profile: true } } },
+      include: { user: { include: { profile: true } }, guest: true },
       orderBy: [{ gamesPlayed: 'asc' }, { waitingSince: 'asc' }],
     }),
     prisma.sessionRegistration.findMany({
@@ -189,7 +190,7 @@ async function loadSnapshot(
       where: { sessionId: session.id, status: { in: ['COMPLETED', 'CORRECTED'] } },
       orderBy: { completedAt: 'desc' },
       take: 20,
-      include: { participants: { select: { userId: true, team: true } } },
+      include: { participants: { select: { participantId: true, team: true } } },
     }),
   ]);
 
@@ -208,13 +209,17 @@ async function loadSnapshot(
     throw AppError.conflict('All courts are currently occupied or unavailable');
   }
 
+  const registeredUserIds = queueEntries
+    .filter((entry) => entry.participantType === 'REGISTERED' && entry.userId)
+    .map((entry) => entry.userId!);
   const activeMemberIds = new Set(
     (
       await prisma.clubMembership.findMany({
         where: {
           clubId: session.clubId,
-          userId: { in: queueEntries.map((entry) => entry.userId) },
+          userId: { in: registeredUserIds },
           status: 'ACTIVE',
+          user: { accountStatus: 'ACTIVE' },
         },
         select: { userId: true },
       })
@@ -222,15 +227,32 @@ async function loadSnapshot(
   );
   const registrationMap = new Map(registrations.map((row) => [row.userId, row.status]));
   const now = Date.now();
-  const eligibleEntries = queueEntries.filter((entry) => activeMemberIds.has(entry.userId));
+  const eligibleEntries = queueEntries.filter((entry) => {
+    if (entry.participantType === 'GUEST') {
+      return entry.guest?.status === 'ACTIVE';
+    }
+    return Boolean(entry.userId && activeMemberIds.has(entry.userId));
+  });
   const players = eligibleEntries.map((entry) => ({
     id: entry.id,
-    userId: entry.userId,
-    displayName: entry.user.profile?.displayName ?? entry.user.name,
-    skill: entry.user.profile?.skillRating ?? 3,
+    // The engine treats userId as a stable participant identity. Guests use
+    // their guest id here; no authenticated account is implied.
+    userId: entry.participantId,
+    participantType: entry.participantType as 'REGISTERED' | 'GUEST',
+    displayName:
+      entry.guest?.displayName ??
+      entry.user?.profile?.displayName ??
+      entry.user?.name ??
+      'Unknown player',
+    skill: entry.guest?.skillRating ?? entry.user?.profile?.skillRating ?? 3,
     gamesPlayed: entry.gamesPlayed,
     waitingSince: entry.waitingSince.getTime(),
-    checkedIn: registrationMap.get(entry.userId) === 'CHECKED_IN',
+    checkedIn:
+      entry.participantType === 'GUEST'
+        ? true
+        : entry.userId
+          ? registrationMap.get(entry.userId) === 'CHECKED_IN'
+          : false,
     paused: entry.state === 'PAUSED',
     left: entry.state === 'LEFT',
     restUntil: entry.restUntil?.getTime() ?? null,
@@ -249,8 +271,8 @@ async function loadSnapshot(
       id: match.id,
       round: match.round,
       completedAt: match.completedAt?.getTime() ?? match.createdAt.getTime(),
-      teamAUserIds: match.participants.filter((p) => p.team === 'A').map((p) => p.userId),
-      teamBUserIds: match.participants.filter((p) => p.team === 'B').map((p) => p.userId),
+      teamAUserIds: match.participants.filter((p) => p.team === 'A').map((p) => p.participantId),
+      teamBUserIds: match.participants.filter((p) => p.team === 'B').map((p) => p.participantId),
     })),
   });
 
@@ -419,6 +441,9 @@ export async function commitRotation(
   }));
   const allPlayers = assignments.flatMap(({ teamA, teamB }) => [...teamA, ...teamB]);
   const playerIds = allPlayers.map((player) => player.userId);
+  const registeredPlayerIds = allPlayers
+    .filter((player) => player.participantType !== 'GUEST')
+    .map((player) => player.userId);
   if (new Set(playerIds).size !== playerIds.length) {
     throw AppError.conflict('The preview contains a duplicate player and cannot be committed');
   }
@@ -441,20 +466,21 @@ export async function commitRotation(
     }
 
     const registrationRows = await tx.sessionRegistration.findMany({
-      where: { sessionId, userId: { in: playerIds } },
+      where: { sessionId, userId: { in: registeredPlayerIds } },
       select: { userId: true, status: true },
     });
     const registrationMap = new Map(registrationRows.map((row) => [row.userId, row.status]));
     const queueRows = await tx.queueEntry.findMany({
-      where: { sessionId, userId: { in: playerIds } },
-      include: { user: { include: { profile: true } } },
+      where: { sessionId, participantId: { in: playerIds } },
+      include: { user: { include: { profile: true } }, guest: true },
     });
-    const queueMap = new Map(queueRows.map((row) => [row.userId, row]));
+    const queueMap = new Map(queueRows.map((row) => [row.participantId, row]));
     const activeMemberships = await tx.clubMembership.findMany({
       where: {
         clubId: access.session.clubId,
-        userId: { in: playerIds },
+        userId: { in: registeredPlayerIds },
         status: 'ACTIVE',
+        user: { accountStatus: 'ACTIVE' },
       },
       select: { userId: true },
     });
@@ -462,16 +488,23 @@ export async function commitRotation(
     const invalid: string[] = [];
     for (const player of allPlayers) {
       const entry = queueMap.get(player.userId);
-      if (!activeMemberIds.has(player.userId)) {
-        invalid.push(`${player.displayName} is no longer an active club member`);
-        continue;
-      }
+      const isGuest = player.participantType === 'GUEST' || entry?.participantType === 'GUEST';
       if (!entry) {
         invalid.push(`${player.displayName} is no longer in the queue`);
         continue;
       }
-      if (registrationMap.get(player.userId) !== 'CHECKED_IN') {
-        invalid.push(`${player.displayName} is not checked in`);
+      if (isGuest) {
+        if (entry.guest?.status !== 'ACTIVE') {
+          invalid.push(`${player.displayName} is no longer an active guest`);
+        }
+      } else {
+        if (!activeMemberIds.has(player.userId)) {
+          invalid.push(`${player.displayName} is no longer an active club member`);
+          continue;
+        }
+        if (registrationMap.get(player.userId) !== 'CHECKED_IN') {
+          invalid.push(`${player.displayName} is not checked in`);
+        }
       }
       if (!['WAITING', 'RESTING'].includes(entry.state)) {
         invalid.push(`${player.displayName} is ${entry.state.toLowerCase()}`);
@@ -547,11 +580,19 @@ export async function commitRotation(
             create: [...teamA, ...teamB].map((player, index) => {
               const entry = queueMap.get(player.userId)!;
               return {
-                userId: player.userId,
+                participantId: entry.participantId,
+                participantType: entry.participantType,
+                userId: entry.userId,
+                guestId: entry.guestId,
                 team: index < teamA.length ? 'A' : 'B',
                 position: index < teamA.length ? index : index - teamA.length,
-                displayName: entry.user.profile?.displayName ?? entry.user.name,
-                skillRating: entry.user.profile?.skillRating ?? 3,
+                displayName:
+                  entry.guest?.displayName ??
+                  entry.user?.profile?.displayName ??
+                  entry.user?.name ??
+                  player.displayName,
+                skillRating:
+                  entry.guest?.skillRating ?? entry.user?.profile?.skillRating ?? player.skill,
               };
             }),
           },
@@ -569,7 +610,9 @@ export async function commitRotation(
       });
       for (const player of [...teamA, ...teamB]) {
         await tx.queueEntry.update({
-          where: { sessionId_userId: { sessionId, userId: player.userId } },
+          where: {
+            sessionId_participantId: { sessionId, participantId: player.userId },
+          },
           data: {
             state: 'PLAYING',
             currentMatchId: match.id,
@@ -698,31 +741,42 @@ export async function overridePreviewPlayer(
     throw AppError.badRequest('The replacement must currently be on the bench');
   }
 
-  const [queueEntry, registration, membership] = await Promise.all([
-    prisma.queueEntry.findUnique({
-      where: { sessionId_userId: { sessionId, userId: input.replacementUserId } },
-      include: { user: { include: { profile: true } } },
-    }),
-    prisma.sessionRegistration.findUnique({
-      where: { sessionId_userId: { sessionId, userId: input.replacementUserId } },
-    }),
-    prisma.clubMembership.findUnique({
-      where: {
-        clubId_userId: { clubId: access.session.clubId, userId: input.replacementUserId },
-      },
-      select: { status: true },
-    }),
-  ]);
+  const queueEntry = await prisma.queueEntry.findUnique({
+    where: {
+      sessionId_participantId: { sessionId, participantId: input.replacementUserId },
+    },
+    include: { user: { include: { profile: true } }, guest: true },
+  });
   if (
     !queueEntry ||
     !['WAITING', 'RESTING'].includes(queueEntry.state) ||
-    queueEntry.currentMatchId ||
-    membership?.status !== 'ACTIVE'
+    queueEntry.currentMatchId
   ) {
     throw AppError.conflict('The replacement is no longer eligible to enter the rotation');
   }
-  if (registration?.status !== 'CHECKED_IN') {
-    throw AppError.conflict('The replacement is not checked in');
+  const isGuest = queueEntry.participantType === 'GUEST';
+  if (isGuest) {
+    if (queueEntry.guest?.status !== 'ACTIVE') {
+      throw AppError.conflict('The replacement is no longer an active guest');
+    }
+  } else {
+    const [registration, membership] = await Promise.all([
+      prisma.sessionRegistration.findUnique({
+        where: { sessionId_userId: { sessionId, userId: input.replacementUserId } },
+      }),
+      prisma.clubMembership.findUnique({
+        where: {
+          clubId_userId: { clubId: access.session.clubId, userId: input.replacementUserId },
+        },
+        select: { status: true },
+      }),
+    ]);
+    if (membership?.status !== 'ACTIVE' || queueEntry.user?.accountStatus !== 'ACTIVE') {
+      throw AppError.conflict('The replacement is no longer eligible to enter the rotation');
+    }
+    if (registration?.status !== 'CHECKED_IN') {
+      throw AppError.conflict('The replacement is not checked in');
+    }
   }
   if (queueEntry.restUntil && queueEntry.restUntil.getTime() > Date.now()) {
     throw AppError.conflict('The replacement is still resting');
@@ -734,9 +788,14 @@ export async function overridePreviewPlayer(
 
   const replacement: SelectedPlayer = {
     queueEntryId: queueEntry.id,
-    userId: queueEntry.userId,
-    displayName: queueEntry.user.profile?.displayName ?? queueEntry.user.name,
-    skill: queueEntry.user.profile?.skillRating ?? 3,
+    userId: queueEntry.participantId,
+    participantType: queueEntry.participantType as 'REGISTERED' | 'GUEST',
+    displayName:
+      queueEntry.guest?.displayName ??
+      queueEntry.user?.profile?.displayName ??
+      queueEntry.user?.name ??
+      'Player',
+    skill: queueEntry.guest?.skillRating ?? queueEntry.user?.profile?.skillRating ?? 3,
     gamesPlayed: queueEntry.gamesPlayed,
     waitMinutes: Math.round(Math.max(0, Date.now() - queueEntry.waitingSince.getTime()) / 60_000),
   };
@@ -755,6 +814,7 @@ export async function overridePreviewPlayer(
     {
       queueEntryId: replaced.queueEntryId,
       userId: replaced.userId,
+      participantType: replaced.participantType,
       displayName: replaced.displayName,
       gamesPlayed: replaced.gamesPlayed,
       waitMinutes: replaced.waitMinutes,
@@ -795,8 +855,8 @@ export async function overridePreviewPlayer(
       summary: `Rotation override: ${replacement.displayName} replaced ${replaced.displayName}`,
       metadata: {
         rotationId,
-        playerUserId: replaced.userId,
-        replacementUserId: replacement.userId,
+        playerParticipantId: replaced.userId,
+        replacementParticipantId: replacement.userId,
         courtId: assignment.courtId,
       },
       ip: meta.ip,

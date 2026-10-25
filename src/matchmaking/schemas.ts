@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PARTICIPANT_TYPES } from '@picklequeue/contracts';
 
 export const rotationPreviewSchema = z.object({
   format: z.enum(['SINGLES', 'DOUBLES']).optional(),
@@ -24,6 +25,7 @@ export const rotationSwapSchema = z.object({
 export const selectedPlayerSchema = z.object({
   queueEntryId: z.string(),
   userId: z.string(),
+  participantType: z.enum(PARTICIPANT_TYPES).optional(),
   displayName: z.string(),
   skill: z.number(),
   gamesPlayed: z.number().int(),

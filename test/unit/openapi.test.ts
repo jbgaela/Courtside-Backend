@@ -15,6 +15,8 @@ describe('OpenAPI contract', () => {
     for (const path of [
       '/auth/login',
       '/clubs/{clubId}/sessions',
+      '/sessions/{sessionId}/guests',
+      '/sessions/{sessionId}/guests/{guestId}',
       '/sessions/{sessionId}/rotations/preview',
       '/sessions/{sessionId}/rotations/commit',
       '/matches/{matchId}/score-events',
@@ -28,5 +30,11 @@ describe('OpenAPI contract', () => {
   it('documents session cookies and CSRF', () => {
     expect(document.components.securitySchemes.sessionCookie).toBeTruthy();
     expect(document.components.securitySchemes.csrfToken).toBeTruthy();
+  });
+
+  it('documents the guest participant contract', () => {
+    expect(document.components.schemas.GuestPlayer).toBeTruthy();
+    expect(document.components.schemas.CreateGuestRequest).toBeTruthy();
+    expect(document.components.schemas.UpdateGuestRequest).toBeTruthy();
   });
 });

@@ -1,4 +1,10 @@
-import type { Club, ClubMembership, PlaySession, SessionRegistration } from '@prisma/client';
+import type {
+  Club,
+  ClubMembership,
+  PlaySession,
+  SessionGuest,
+  SessionRegistration,
+} from '@prisma/client';
 import type { MatchmakingConfig, ScoringConfig } from '@picklequeue/contracts';
 import { MATCHMAKING_DEFAULTS, SCORING_DEFAULTS } from '@picklequeue/contracts';
 
@@ -13,6 +19,7 @@ export function sessionDto(
     counts?: {
       registered: number;
       checkedIn: number;
+      guests?: number;
       waiting: number;
       playing: number;
       pending: number;
@@ -80,7 +87,11 @@ export function registrationDto(
 ) {
   return {
     id: registration.id,
+    participantId: registration.userId,
+    participantType: 'REGISTERED',
     userId: registration.userId,
+    guestId: null,
+    gender: null,
     name: registration.user.name,
     email: registration.user.email,
     displayName: registration.user.profile?.displayName ?? registration.user.name,
@@ -89,6 +100,50 @@ export function registrationDto(
     registeredAt: registration.registeredAt.toISOString(),
     checkedInAt: registration.checkedInAt?.toISOString() ?? null,
     checkInMethod: registration.checkInMethod,
+    queueState,
+  };
+}
+
+export function guestParticipantDto(guest: SessionGuest, queueState: string | null = null) {
+  const active = guest.status === 'ACTIVE';
+  return {
+    id: guest.id,
+    participantId: guest.id,
+    participantType: 'GUEST',
+    userId: null,
+    guestId: guest.id,
+    name: guest.displayName,
+    email: null,
+    displayName: guest.displayName,
+    gender: guest.gender,
+    skillRating: guest.skillRating,
+    status: active ? 'CHECKED_IN' : 'WITHDRAWN',
+    guestStatus: guest.status,
+    version: guest.version,
+    registeredAt: guest.createdAt.toISOString(),
+    checkedInAt: active ? guest.createdAt.toISOString() : null,
+    checkInMethod: active ? 'MANAGER' : null,
+    removedAt: guest.removedAt?.toISOString() ?? null,
+    queueState,
+  };
+}
+
+export function guestDto(guest: SessionGuest, queueState: string | null = null) {
+  return {
+    id: guest.id,
+    sessionId: guest.sessionId,
+    displayName: guest.displayName,
+    name: guest.displayName,
+    gender: guest.gender,
+    skillRating: guest.skillRating,
+    participantType: 'GUEST',
+    participantId: guest.id,
+    status: guest.status,
+    version: guest.version,
+    createdById: guest.createdById,
+    createdAt: guest.createdAt.toISOString(),
+    updatedAt: guest.updatedAt.toISOString(),
+    removedAt: guest.removedAt?.toISOString() ?? null,
     queueState,
   };
 }

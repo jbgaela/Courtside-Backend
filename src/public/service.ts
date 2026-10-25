@@ -52,7 +52,7 @@ async function getPublishedSession(publicId: string) {
 }
 
 async function sessionPublicData(session: PlaySession & { club: Club }) {
-  const [courts, matches, results, checkedIn, waiting] = await Promise.all([
+  const [courts, matches, results, checkedIn, guests, waiting] = await Promise.all([
     prisma.sessionCourt.findMany({
       where: { sessionId: session.id, active: true },
       include: { court: true },
@@ -73,6 +73,7 @@ async function sessionPublicData(session: PlaySession & { club: Club }) {
       take: 20,
     }),
     prisma.sessionRegistration.count({ where: { sessionId: session.id, status: 'CHECKED_IN' } }),
+    prisma.sessionGuest.count({ where: { sessionId: session.id, status: 'ACTIVE' } }),
     prisma.queueEntry.count({ where: { sessionId: session.id, state: 'WAITING' } }),
   ]);
 
@@ -95,7 +96,7 @@ async function sessionPublicData(session: PlaySession & { club: Club }) {
       location: session.club.location,
     },
     counts: {
-      checkedIn,
+      checkedIn: checkedIn + guests,
       waiting,
       courts: courts.length,
     },

@@ -160,7 +160,12 @@ describe('rotations, scoring and completion', () => {
     expect(matchRow.result?.winnerTeam).toBe('A');
     for (const participant of matchRow.participants) {
       const queue = await prisma.queueEntry.findUnique({
-        where: { sessionId_userId: { sessionId: setup.session.id, userId: participant.userId } },
+        where: {
+          sessionId_participantId: {
+            sessionId: setup.session.id,
+            participantId: participant.participantId,
+          },
+        },
       });
       expect(queue?.gamesPlayed).toBe(1);
       expect(queue?.currentMatchId).toBeNull();

@@ -9,6 +9,13 @@ import { initRealtime } from './realtime/gateway.js';
 async function main(): Promise<void> {
   const app = createApp();
   const server = createServer(app);
+  // Bound slow clients and header abuse. Keep the keep-alive window compatible
+  // with common reverse proxies; application requests are still short-lived.
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 65_000;
+  server.maxHeadersCount = 100;
+  server.maxRequestsPerSocket = 1_000;
   initRealtime(server);
 
   server.listen(env.PORT, () => {

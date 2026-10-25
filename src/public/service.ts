@@ -39,7 +39,12 @@ async function getPublishedSession(publicId: string) {
     where: { publicId },
     include: { club: true },
   });
-  if (!session || !session.published || session.status === 'DRAFT') {
+  if (
+    !session ||
+    !session.published ||
+    session.status === 'DRAFT' ||
+    session.status === 'CANCELLED'
+  ) {
     throw AppError.notFound('Public session not found');
   }
   if (session.club.archivedAt) throw AppError.notFound('Public session not found');

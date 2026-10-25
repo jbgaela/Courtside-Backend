@@ -6,6 +6,7 @@ import { prisma } from '../infrastructure/prisma.js';
 import { randomToken, sha256, slugify } from '../security/tokens.js';
 import { writeAudit } from '../audit/audit.js';
 import { getClubAccess, getClubForAdmin, getClubForOwner } from './access.js';
+import { publishSessionEvent, revokePublicRoom } from '../realtime/gateway.js';
 import { clubDto, courtDto, invitationDto, membershipDto } from './serializers.js';
 
 interface AuditMeta {
@@ -14,6 +15,7 @@ interface AuditMeta {
 }
 
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
+const ACTIVE_MATCH_STATUSES = ['PROPOSED', 'RESERVED', 'READY', 'IN_PROGRESS'];
 
 async function uniqueSlug(name: string): Promise<string> {
   const base = slugify(name) || 'club';
@@ -253,6 +255,55 @@ export async function requestMembership(clubId: string, userId: string, meta: Au
   return { membership: { id: membership.id, status: membership.status, role: membership.role } };
 }
 
+async function revokeMemberFromActiveSessions(
+  tx: Prisma.TransactionClient,
+  clubId: string,
+  userId: string,
+) {
+  const sessions = await tx.playSession.findMany({
+    where: {
+      clubId,
+      status: { in: ['DRAFT', 'SCHEDULED', 'CHECK_IN_OPEN', 'LIVE'] },
+    },
+    select: { id: true },
+  });
+  if (sessions.length === 0) return [];
+  const sessionIds = sessions.map((session) => session.id);
+  await tx.queueEntry.updateMany({
+    where: { sessionId: { in: sessionIds }, userId, state: { not: 'LEFT' } },
+    data: { state: 'LEFT', currentMatchId: null, version: { increment: 1 } },
+  });
+  await tx.sessionRegistration.updateMany({
+    where: {
+      sessionId: { in: sessionIds },
+      userId,
+      status: { in: ['PENDING', 'REGISTERED', 'CHECKED_IN'] },
+    },
+    data: { status: 'WITHDRAWN', respondedAt: new Date() },
+  });
+  await tx.playSession.updateMany({
+    where: { id: { in: sessionIds } },
+    data: { version: { increment: 1 } },
+  });
+  return tx.playSession.findMany({
+    where: { id: { in: sessionIds } },
+    select: { id: true, publicId: true, version: true },
+  });
+}
+
+function publishMembershipSessionUpdates(
+  sessions: Array<{ id: string; publicId: string; version: number }>,
+): void {
+  for (const session of sessions) {
+    publishSessionEvent({
+      sessionId: session.id,
+      publicId: session.publicId,
+      type: 'queue.updated',
+      version: session.version,
+    });
+  }
+}
+
 export async function updateMember(
   clubId: string,
   actorId: string,
@@ -272,26 +323,34 @@ export async function updateMember(
   if (input.role === 'OWNER') {
     throw AppError.badRequest('Use the ownership transfer workflow');
   }
-  const membership = await prisma.clubMembership.update({
-    where: { id: target.id },
-    data: {
-      ...(input.role ? { role: input.role } : {}),
-      ...(input.status ? { status: input.status } : {}),
-      ...(input.status === 'ACTIVE' && !target.joinedAt ? { joinedAt: new Date() } : {}),
-    },
-    include: { user: { include: { profile: true } } },
+  const { membership, sessions } = await prisma.$transaction(async (tx) => {
+    const saved = await tx.clubMembership.update({
+      where: { id: target.id },
+      data: {
+        ...(input.role ? { role: input.role } : {}),
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.status === 'ACTIVE' && !target.joinedAt ? { joinedAt: new Date() } : {}),
+      },
+      include: { user: { include: { profile: true } } },
+    });
+    const changedSessions =
+      input.status && input.status !== 'ACTIVE'
+        ? await revokeMemberFromActiveSessions(tx, clubId, target.userId)
+        : [];
+    await writeAudit(tx, {
+      clubId,
+      actorId,
+      action: 'club.member_updated',
+      entityType: 'ClubMembership',
+      entityId: target.id,
+      summary: `Membership updated for user ${target.userId}`,
+      metadata: input as unknown as Prisma.InputJsonValue,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+    });
+    return { membership: saved, sessions: changedSessions };
   });
-  await writeAudit(prisma, {
-    clubId,
-    actorId,
-    action: 'club.member_updated',
-    entityType: 'ClubMembership',
-    entityId: target.id,
-    summary: `Membership updated for user ${target.userId}`,
-    metadata: input as unknown as Prisma.InputJsonValue,
-    ip: meta.ip,
-    userAgent: meta.userAgent,
-  });
+  publishMembershipSessionUpdates(sessions);
   return membershipDto(membership, { includeEmail: true });
 }
 
@@ -305,20 +364,25 @@ export async function removeMember(
   const target = await prisma.clubMembership.findFirst({ where: { id: membershipId, clubId } });
   if (!target) throw AppError.notFound('Membership not found');
   if (target.role === 'OWNER') throw AppError.forbidden('The owner cannot be removed');
-  const membership = await prisma.clubMembership.update({
-    where: { id: target.id },
-    data: { status: 'LEFT', role: 'PLAYER', updatedAt: new Date() },
+  const { membership, sessions } = await prisma.$transaction(async (tx) => {
+    const saved = await tx.clubMembership.update({
+      where: { id: target.id },
+      data: { status: 'LEFT', role: 'PLAYER', updatedAt: new Date() },
+    });
+    const changedSessions = await revokeMemberFromActiveSessions(tx, clubId, target.userId);
+    await writeAudit(tx, {
+      clubId,
+      actorId,
+      action: 'club.member_removed',
+      entityType: 'ClubMembership',
+      entityId: target.id,
+      summary: `Member ${target.userId} removed`,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+    });
+    return { membership: saved, sessions: changedSessions };
   });
-  await writeAudit(prisma, {
-    clubId,
-    actorId,
-    action: 'club.member_removed',
-    entityType: 'ClubMembership',
-    entityId: target.id,
-    summary: `Member ${target.userId} removed`,
-    ip: meta.ip,
-    userAgent: meta.userAgent,
-  });
+  publishMembershipSessionUpdates(sessions);
   return { id: membership.id, status: membership.status };
 }
 
@@ -327,20 +391,25 @@ export async function leaveClub(clubId: string, userId: string, meta: AuditMeta)
   if (access.membership.role === 'OWNER') {
     throw AppError.conflict('Transfer ownership before leaving the club');
   }
-  await prisma.clubMembership.update({
-    where: { id: access.membership.id },
-    data: { status: 'LEFT', role: 'PLAYER', updatedAt: new Date() },
+  const { sessions } = await prisma.$transaction(async (tx) => {
+    await tx.clubMembership.update({
+      where: { id: access.membership.id },
+      data: { status: 'LEFT', role: 'PLAYER', updatedAt: new Date() },
+    });
+    const changedSessions = await revokeMemberFromActiveSessions(tx, clubId, userId);
+    await writeAudit(tx, {
+      clubId,
+      actorId: userId,
+      action: 'club.member_left',
+      entityType: 'ClubMembership',
+      entityId: access.membership.id,
+      summary: 'Left the club',
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+    });
+    return { sessions: changedSessions };
   });
-  await writeAudit(prisma, {
-    clubId,
-    actorId: userId,
-    action: 'club.member_left',
-    entityType: 'ClubMembership',
-    entityId: access.membership.id,
-    summary: 'Left the club',
-    ip: meta.ip,
-    userAgent: meta.userAgent,
-  });
+  publishMembershipSessionUpdates(sessions);
   return { left: true };
 }
 
@@ -390,6 +459,12 @@ export async function archiveClub(clubId: string, actorId: string, meta: AuditMe
   await getClubForOwner(clubId, actorId);
   const live = await prisma.playSession.count({ where: { clubId, status: 'LIVE' } });
   if (live > 0) throw AppError.conflict('Complete or cancel live sessions before archiving');
+  const publicIds = (
+    await prisma.playSession.findMany({
+      where: { clubId, published: true },
+      select: { publicId: true },
+    })
+  ).map((session) => session.publicId);
   await prisma.$transaction(async (tx) => {
     await tx.club.update({ where: { id: clubId }, data: { archivedAt: new Date() } });
     await tx.playSession.updateMany({
@@ -407,6 +482,7 @@ export async function archiveClub(clubId: string, actorId: string, meta: AuditMe
       userAgent: meta.userAgent,
     });
   });
+  for (const publicId of publicIds) revokePublicRoom(publicId);
   return { archived: true };
 }
 
@@ -624,6 +700,14 @@ export async function updateCourt(
   await getClubForAdmin(clubId, actorId);
   const existing = await prisma.court.findFirst({ where: { id: courtId, clubId } });
   if (!existing) throw AppError.notFound('Court not found');
+  if (input.status !== undefined && input.status !== existing.status) {
+    const activeMatches = await prisma.match.count({
+      where: { courtId, status: { in: ACTIVE_MATCH_STATUSES } },
+    });
+    if (activeMatches > 0) {
+      throw AppError.conflict('Finish the active match before changing this court status');
+    }
+  }
   try {
     const court = await prisma.court.update({
       where: { id: courtId },
@@ -671,6 +755,12 @@ export async function deactivateCourt(
   await getClubForAdmin(clubId, actorId);
   const existing = await prisma.court.findFirst({ where: { id: courtId, clubId } });
   if (!existing) throw AppError.notFound('Court not found');
+  const activeMatches = await prisma.match.count({
+    where: { courtId, status: { in: ACTIVE_MATCH_STATUSES } },
+  });
+  if (activeMatches > 0) {
+    throw AppError.conflict('Finish the active match before deactivating this court');
+  }
   await prisma.$transaction([
     prisma.court.update({ where: { id: courtId }, data: { status: 'INACTIVE' } }),
     prisma.sessionCourt.updateMany({

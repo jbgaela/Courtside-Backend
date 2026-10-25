@@ -104,6 +104,15 @@ async function upsertDemoUsers(): Promise<Map<string, { id: string }>> {
 
 async function main(): Promise<void> {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  if (!process.env.NODE_ENV) throw new Error('NODE_ENV is required');
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error(
+      'Refusing to seed demo accounts in production. Set ALLOW_DEMO_SEED=true only for a disposable demo environment.',
+    );
+  }
+  if (process.env.NODE_ENV === 'production' && !process.env.SEED_PASSWORD) {
+    throw new Error('SEED_PASSWORD must be set explicitly for a production demo seed');
+  }
   console.log('Resetting demo club (only riverside-pickleball is touched)...');
   await cleanupDemoClub();
   const users = await upsertDemoUsers();

@@ -9,7 +9,11 @@ import { logger } from './infrastructure/logger.js';
 import { prisma } from './infrastructure/prisma.js';
 import { requestId } from './http/middleware/request-id.js';
 import { withAuth, csrfGuard } from './http/middleware/auth.js';
-import { generalRateLimit } from './http/middleware/rate-limit.js';
+import {
+  generalRateLimit,
+  readinessRateLimit,
+  writeRateLimit,
+} from './http/middleware/rate-limit.js';
 import { errorHandler, notFoundHandler } from './http/error-handler.js';
 import { sendData } from './http/respond.js';
 import { AppError } from './http/errors.js';
@@ -19,6 +23,7 @@ export function createApp(): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  app.disable('etag');
   app.set('trust proxy', env.TRUST_PROXY);
 
   app.use(requestId);
@@ -59,10 +64,11 @@ export function createApp(): Express {
     }),
   );
   app.use(cookieParser());
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '1mb', strict: true }));
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 
   app.get('/health', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     sendData(res, {
       status: 'ok',
       service: 'picklequeue-api',
@@ -71,7 +77,8 @@ export function createApp(): Express {
     });
   });
 
-  app.get('/ready', async (_req, res) => {
+  app.get('/ready', readinessRateLimit, async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       await prisma.$runCommandRaw({ ping: 1 });
       const hello = (await prisma.$runCommandRaw({ hello: 1 })) as Record<string, unknown>;
@@ -94,6 +101,18 @@ export function createApp(): Express {
   });
 
   app.use(generalRateLimit);
+  app.use('/api/v1', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+  app.use('/api/v1', (req, res, next) => {
+    const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if (!unsafe) {
+      next();
+      return;
+    }
+    writeRateLimit(req, res, next);
+  });
   app.use(withAuth);
   app.use(csrfGuard);
   app.use('/api/v1', apiRouter);

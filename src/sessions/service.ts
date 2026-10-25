@@ -14,7 +14,7 @@ import { writeAudit } from '../audit/audit.js';
 import { getClubAccess, getClubForAdmin } from '../clubs/access.js';
 import { getSessionAccess, getSessionForAdmin } from './access.js';
 import { sessionDto } from './serializers.js';
-import { publishSessionEvent } from '../realtime/gateway.js';
+import { publishSessionEvent, revokePublicRoom } from '../realtime/gateway.js';
 
 interface AuditMeta {
   ip?: string;
@@ -610,6 +610,9 @@ export async function transitionSession(
     payload: { status: input.status },
     publicPayload: { status: input.status },
   });
+  if (input.status === 'CANCELLED') {
+    revokePublicRoom(session.publicId);
+  }
 
   return getSessionDetail(sessionId, actorId);
 }
@@ -646,6 +649,7 @@ export async function publishSession(
     version: updated.version,
     payload: { published },
   });
+  if (!published) revokePublicRoom(access.session.publicId);
   return getSessionDetail(sessionId, actorId);
 }
 

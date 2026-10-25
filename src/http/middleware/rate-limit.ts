@@ -1,4 +1,4 @@
-import { rateLimit } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import type { RequestHandler } from 'express';
 import { env } from '../../config/env.js';
 import { AppError } from '../errors.js';
@@ -42,4 +42,32 @@ export const writeRateLimit = rateLimit({
   legacyHeaders: false,
   skip: () => env.RATE_LIMIT_DISABLED,
   handler: handler('Too many write requests. Slow down.'),
+});
+
+export const publicReadRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skip: () => env.RATE_LIMIT_DISABLED,
+  handler: handler('Too many public requests. Slow down.'),
+});
+
+export const readinessRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skip: () => env.RATE_LIMIT_DISABLED,
+  handler: handler('Too many readiness checks. Slow down.'),
+});
+
+export const rotationPreviewRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skip: () => env.RATE_LIMIT_DISABLED,
+  keyGenerator: (req) => req.auth?.user.id ?? ipKeyGenerator(req.ip ?? 'unknown'),
+  handler: handler('Too many rotation previews. Slow down.'),
 });

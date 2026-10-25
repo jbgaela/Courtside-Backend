@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { productionSafetyFailures } from '../../src/config/env.js';
 import { AppError } from '../../src/http/errors.js';
 import { assertPasswordPolicy } from '../../src/security/password.js';
 import { generatePublicId, safeEqual, sha256, slugify } from '../../src/security/tokens.js';
@@ -42,5 +43,25 @@ describe('security utilities', () => {
     expect(error.status).toBe(409);
     expect(error.code).toBe('CONFLICT');
     expect(error.message).toBe('Conflict');
+  });
+
+  it('rejects unsafe production configuration values', () => {
+    const failures = productionSafetyFailures({
+      exposeDevTokens: true,
+      rateLimitDisabled: true,
+      cookieSecure: false,
+      apiPublicOrigin: 'http://api.example.test',
+      frontendOrigins: ['http://app.example.test'],
+    });
+    expect(failures).toHaveLength(5);
+
+    const safe = productionSafetyFailures({
+      exposeDevTokens: false,
+      rateLimitDisabled: false,
+      cookieSecure: true,
+      apiPublicOrigin: 'https://api.example.test',
+      frontendOrigins: ['https://app.example.test'],
+    });
+    expect(safe).toEqual([]);
   });
 });

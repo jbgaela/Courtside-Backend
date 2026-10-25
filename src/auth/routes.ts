@@ -8,6 +8,9 @@ import { authRateLimit } from '../http/middleware/rate-limit.js';
 import { validateBody } from '../http/validate.js';
 import { AppError } from '../http/errors.js';
 import { revokeCurrentSession } from '../auth/session.js';
+import { writeAudit } from '../audit/audit.js';
+import { prisma } from '../infrastructure/prisma.js';
+import { requestMetadata } from '../http/middleware/request-id.js';
 import {
   forgotPasswordSchema,
   loginSchema,
@@ -52,7 +55,11 @@ authRouter.post(
   authRateLimit,
   validateBody(loginSchema),
   asyncHandler(async (req, res) => {
+    const previousAuth = req.auth;
     const result = await loginUser({ ...req.body, req });
+    // Session fixation defence: if a browser already has a valid session,
+    // revoke it after the replacement session is created.
+    if (previousAuth) await revokeCurrentSession(req);
     setSessionCookie(res, result.token);
     sendData(res, {
       user: result.user,
@@ -66,8 +73,19 @@ authRouter.post(
   '/logout',
   authenticated,
   asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const metadata = requestMetadata(req);
     await revokeCurrentSession(req);
     clearSessionCookie(res);
+    await writeAudit(prisma, {
+      actorId: auth.user.id,
+      action: 'user.signed_out',
+      entityType: 'User',
+      entityId: auth.user.id,
+      summary: 'Signed out',
+      ip: metadata.ip,
+      userAgent: metadata.userAgent,
+    });
     sendData(res, { loggedOut: true });
   }),
 );

@@ -14,6 +14,10 @@ import { requestMetadata } from '../http/middleware/request-id.js';
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TTL_MS = 60 * 60 * 1000;
 
+// A real bcrypt hash with the same cost as production passwords. Comparing
+// against this on unknown-email attempts keeps failed-login work comparable.
+const DUMMY_PASSWORD_HASH = '$2b$12$x9THV5hh8WbVMo7pSA9UJuMqwuOrDtSyfbh5QHrEH9hlKpRbHn6Ky';
+
 async function issueEmailToken(
   userId: string,
   type: 'VERIFY_EMAIL' | 'RESET_PASSWORD',
@@ -21,9 +25,20 @@ async function issueEmailToken(
 ): Promise<{ token: string; expiresAt: Date }> {
   const token = randomToken(32);
   const expiresAt = new Date(Date.now() + ttlMs);
-  await prisma.emailToken.create({
-    data: { userId, type, tokenHash: sha256(token), expiresAt },
-  });
+  await prisma.$transaction([
+    // Only the newest verification/reset link remains usable.
+    prisma.emailToken.updateMany({
+      where: {
+        userId,
+        type,
+        OR: [{ usedAt: null }, { usedAt: { isSet: false } }],
+      },
+      data: { usedAt: new Date() },
+    }),
+    prisma.emailToken.create({
+      data: { userId, type, tokenHash: sha256(token), expiresAt },
+    }),
+  ]);
   return { token, expiresAt };
 }
 
@@ -105,17 +120,29 @@ export async function loginUser(input: { email: string; password: string; req: R
   });
 
   // Always perform a bcrypt comparison to reduce timing-based account enumeration.
-  const hash =
-    user?.passwordHash ?? '$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv';
+  const hash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
   const valid = await verifyPassword(input.password, hash);
   if (!user || !valid) {
+    await writeAudit(prisma, {
+      actorId: user?.id ?? null,
+      action: 'user.sign_in_failed',
+      entityType: 'User',
+      entityId: user?.id ?? null,
+      summary: 'Failed sign-in attempt',
+      metadata: { emailHash: sha256(input.email), reason: 'invalid_credentials' },
+      ip: requestMetadata(input.req).ip,
+      userAgent: requestMetadata(input.req).userAgent,
+    }).catch((error: unknown) => {
+      logger.warn({ err: error }, 'Failed to write failed-login audit event');
+    });
     throw AppError.unauthorized('Email or password is incorrect');
   }
   if (user.emailVerifiedAt === null) {
     logger.info({ userId: user.id }, 'Login with unverified email');
   }
 
-  const session = await createAuthSession(user.id, requestMetadata(input.req));
+  const metadata = requestMetadata(input.req);
+  const session = await createAuthSession(user.id, metadata);
   const full = await loadMeData(user.id);
 
   await writeAudit(prisma, {
@@ -124,8 +151,8 @@ export async function loginUser(input: { email: string; password: string; req: R
     entityType: 'User',
     entityId: user.id,
     summary: 'Signed in',
-    ip: requestMetadata(input.req).ip,
-    userAgent: requestMetadata(input.req).userAgent,
+    ip: metadata.ip,
+    userAgent: metadata.userAgent,
   });
 
   return {
@@ -146,16 +173,29 @@ export async function verifyEmail(token: string) {
     where: { tokenHash: sha256(token) },
     include: { user: true },
   });
-  if (!record || record.type !== 'VERIFY_EMAIL' || record.usedAt || record.expiresAt < new Date()) {
+  const now = new Date();
+  if (!record || record.type !== 'VERIFY_EMAIL' || record.usedAt || record.expiresAt <= now) {
     throw AppError.badRequest('This verification link is invalid or has expired');
   }
-  await prisma.$transaction([
-    prisma.emailToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    prisma.user.update({
+  const claimed = await prisma.$transaction(async (tx) => {
+    const updated = await tx.emailToken.updateMany({
+      where: {
+        id: record.id,
+        expiresAt: { gt: now },
+        OR: [{ usedAt: null }, { usedAt: { isSet: false } }],
+      },
+      data: { usedAt: now },
+    });
+    if (updated.count === 0) return false;
+    await tx.user.update({
       where: { id: record.userId },
-      data: { emailVerifiedAt: record.user.emailVerifiedAt ?? new Date() },
-    }),
-  ]);
+      data: { emailVerifiedAt: record.user.emailVerifiedAt ?? now },
+    });
+    return true;
+  });
+  if (!claimed) {
+    throw AppError.badRequest('This verification link is invalid or has expired');
+  }
   await writeAudit(prisma, {
     actorId: record.userId,
     action: 'user.email_verified',
@@ -183,19 +223,27 @@ export async function requestPasswordReset(email: string) {
 export async function resetPassword(token: string, password: string) {
   assertPasswordPolicy(password);
   const record = await prisma.emailToken.findUnique({ where: { tokenHash: sha256(token) } });
-  if (
-    !record ||
-    record.type !== 'RESET_PASSWORD' ||
-    record.usedAt ||
-    record.expiresAt < new Date()
-  ) {
+  const now = new Date();
+  if (!record || record.type !== 'RESET_PASSWORD' || record.usedAt || record.expiresAt <= now) {
     throw AppError.badRequest('This reset link is invalid or has expired');
   }
   const passwordHash = await hashPassword(password);
-  await prisma.$transaction([
-    prisma.emailToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    prisma.user.update({ where: { id: record.userId }, data: { passwordHash } }),
-  ]);
+  const claimed = await prisma.$transaction(async (tx) => {
+    const updated = await tx.emailToken.updateMany({
+      where: {
+        id: record.id,
+        expiresAt: { gt: now },
+        OR: [{ usedAt: null }, { usedAt: { isSet: false } }],
+      },
+      data: { usedAt: now },
+    });
+    if (updated.count === 0) return false;
+    await tx.user.update({ where: { id: record.userId }, data: { passwordHash } });
+    return true;
+  });
+  if (!claimed) {
+    throw AppError.badRequest('This reset link is invalid or has expired');
+  }
   await revokeAllSessions(record.userId);
   await writeAudit(prisma, {
     actorId: record.userId,

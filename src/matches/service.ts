@@ -384,7 +384,10 @@ export async function completeMatch(
       where: { matchId, status: 'ACTIVE' },
       data: { status: 'COMPLETED' },
     });
-    await tx.court.update({ where: { id: match.courtId }, data: { status: 'AVAILABLE' } });
+    await tx.court.updateMany({
+      where: { id: match.courtId, status: 'IN_USE' },
+      data: { status: 'AVAILABLE' },
+    });
     const session = await tx.playSession.update({
       where: { id: match.sessionId },
       data: { version: { increment: 1 } },

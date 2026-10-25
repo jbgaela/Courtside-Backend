@@ -18,6 +18,9 @@ try {
     RATE_LIMIT_DISABLED: 'true',
     LOG_LEVEL: 'silent',
     TRUST_PROXY: 'false',
+    FRONTEND_ORIGIN: 'http://localhost:3000',
+    SOCKET_SESSION_CHECK_INTERVAL_MS: '1000',
+    SOCKET_MAX_CONNECTIONS_PER_IP: '100',
   };
 
   const pushExit = runCommand('pnpm exec prisma db push --skip-generate', env);

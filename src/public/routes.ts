@@ -2,6 +2,7 @@ import { Router, type Router as ExpressRouter } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { sendData } from '../http/respond.js';
 import { param } from '../http/params.js';
+import { publicReadRateLimit } from '../http/middleware/rate-limit.js';
 import {
   getPublicClub,
   getPublicLiveMatches,
@@ -10,6 +11,8 @@ import {
 } from './service.js';
 
 export const publicRouter: ExpressRouter = Router();
+
+publicRouter.use(publicReadRateLimit);
 
 publicRouter.get(
   '/sessions/:publicId',

@@ -5,6 +5,7 @@ import { sendData } from '../http/respond.js';
 import { param } from '../http/params.js';
 import { validateBody, validateQuery } from '../http/validate.js';
 import { requestMetadata } from '../http/middleware/request-id.js';
+import { rotationPreviewRateLimit } from '../http/middleware/rate-limit.js';
 import {
   checkInSchema,
   createSessionSchema,
@@ -373,6 +374,7 @@ sessionsRouter.post(
   '/:sessionId/rotations/preview',
   authenticated,
   emailVerified,
+  rotationPreviewRateLimit,
   validateBody(rotationPreviewSchema),
   asyncHandler(async (req, res) => {
     const auth = requireAuth(req);

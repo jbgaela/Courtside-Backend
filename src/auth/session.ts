@@ -5,6 +5,7 @@ import { prisma } from '../infrastructure/prisma.js';
 import { logger } from '../infrastructure/logger.js';
 import { randomToken, sha256 } from '../security/tokens.js';
 import { readSessionCookie } from './cookies.js';
+import { revokeSocketSession } from '../realtime/gateway.js';
 
 export interface CreatedSession {
   token: string;
@@ -44,7 +45,14 @@ export async function attachAuth(req: Request): Promise<void> {
   });
 
   if (!record) return;
+  const idleMs = env.SESSION_IDLE_DAYS * 24 * 60 * 60 * 1000;
   if (record.revokedAt || record.expiresAt.getTime() <= Date.now()) {
+    return;
+  }
+  if (Date.now() - record.lastUsedAt.getTime() > idleMs) {
+    void prisma.authSession
+      .update({ where: { id: record.id }, data: { revokedAt: new Date() } })
+      .catch((error: unknown) => logger.warn({ err: error }, 'Failed to revoke idle session'));
     return;
   }
 
@@ -86,9 +94,18 @@ export async function revokeCurrentSession(req: Request): Promise<void> {
     where: { id: req.auth.session.id },
     data: { revokedAt: new Date() },
   });
+  revokeSocketSession(req.auth.session.id);
 }
 
 export async function revokeAllSessions(userId: string, exceptId?: string): Promise<void> {
+  const sessions = await prisma.authSession.findMany({
+    where: {
+      userId,
+      OR: [{ revokedAt: null }, { revokedAt: { isSet: false } }],
+      ...(exceptId ? { id: { not: exceptId } } : {}),
+    },
+    select: { id: true },
+  });
   await prisma.authSession.updateMany({
     where: {
       userId,
@@ -97,4 +114,5 @@ export async function revokeAllSessions(userId: string, exceptId?: string): Prom
     },
     data: { revokedAt: new Date() },
   });
+  for (const session of sessions) revokeSocketSession(session.id);
 }

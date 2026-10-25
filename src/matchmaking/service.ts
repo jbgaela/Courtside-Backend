@@ -208,9 +208,22 @@ async function loadSnapshot(
     throw AppError.conflict('All courts are currently occupied or unavailable');
   }
 
+  const activeMemberIds = new Set(
+    (
+      await prisma.clubMembership.findMany({
+        where: {
+          clubId: session.clubId,
+          userId: { in: queueEntries.map((entry) => entry.userId) },
+          status: 'ACTIVE',
+        },
+        select: { userId: true },
+      })
+    ).map((row) => row.userId),
+  );
   const registrationMap = new Map(registrations.map((row) => [row.userId, row.status]));
   const now = Date.now();
-  const players = queueEntries.map((entry) => ({
+  const eligibleEntries = queueEntries.filter((entry) => activeMemberIds.has(entry.userId));
+  const players = eligibleEntries.map((entry) => ({
     id: entry.id,
     userId: entry.userId,
     displayName: entry.user.profile?.displayName ?? entry.user.name,
@@ -437,9 +450,22 @@ export async function commitRotation(
       include: { user: { include: { profile: true } } },
     });
     const queueMap = new Map(queueRows.map((row) => [row.userId, row]));
+    const activeMemberships = await tx.clubMembership.findMany({
+      where: {
+        clubId: access.session.clubId,
+        userId: { in: playerIds },
+        status: 'ACTIVE',
+      },
+      select: { userId: true },
+    });
+    const activeMemberIds = new Set(activeMemberships.map((row) => row.userId));
     const invalid: string[] = [];
     for (const player of allPlayers) {
       const entry = queueMap.get(player.userId);
+      if (!activeMemberIds.has(player.userId)) {
+        invalid.push(`${player.displayName} is no longer an active club member`);
+        continue;
+      }
       if (!entry) {
         invalid.push(`${player.displayName} is no longer in the queue`);
         continue;
@@ -672,7 +698,7 @@ export async function overridePreviewPlayer(
     throw AppError.badRequest('The replacement must currently be on the bench');
   }
 
-  const [queueEntry, registration] = await Promise.all([
+  const [queueEntry, registration, membership] = await Promise.all([
     prisma.queueEntry.findUnique({
       where: { sessionId_userId: { sessionId, userId: input.replacementUserId } },
       include: { user: { include: { profile: true } } },
@@ -680,11 +706,18 @@ export async function overridePreviewPlayer(
     prisma.sessionRegistration.findUnique({
       where: { sessionId_userId: { sessionId, userId: input.replacementUserId } },
     }),
+    prisma.clubMembership.findUnique({
+      where: {
+        clubId_userId: { clubId: access.session.clubId, userId: input.replacementUserId },
+      },
+      select: { status: true },
+    }),
   ]);
   if (
     !queueEntry ||
     !['WAITING', 'RESTING'].includes(queueEntry.state) ||
-    queueEntry.currentMatchId
+    queueEntry.currentMatchId ||
+    membership?.status !== 'ACTIVE'
   ) {
     throw AppError.conflict('The replacement is no longer eligible to enter the rotation');
   }
@@ -839,8 +872,15 @@ export async function maybeAutoRotate(sessionId: string): Promise<void> {
     if (!config.autoAssign) return;
     const membership = await prisma.clubMembership.findUnique({
       where: { clubId_userId: { clubId: session.clubId, userId: session.createdById } },
+      select: { status: true, role: true },
     });
-    if (!membership || membership.status !== 'ACTIVE') return;
+    if (
+      !membership ||
+      membership.status !== 'ACTIVE' ||
+      !['OWNER', 'QUEUE_MASTER'].includes(membership.role)
+    ) {
+      return;
+    }
 
     const preview = await createPreview(sessionId, session.createdById);
     if (preview.assignments.length === 0) {

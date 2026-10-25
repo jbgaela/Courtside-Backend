@@ -42,10 +42,10 @@ async function getDetail(userId: string) {
   return adminUserDetail(user);
 }
 
-async function assertNotLastSuperAdmin(userId: string) {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+async function assertNotLastSuperAdmin(tx: Prisma.TransactionClient, userId: string) {
+  const user = await tx.user.findUnique({ where: { id: userId } });
   if (!user || platformRoleOf(user) !== 'SUPER_ADMIN') return;
-  const count = await prisma.user.count({
+  const count = await tx.user.count({
     where: {
       platformRole: 'SUPER_ADMIN',
       accountStatus: 'ACTIVE',
@@ -55,6 +55,47 @@ async function assertNotLastSuperAdmin(userId: string) {
   if (count <= 1) {
     throw AppError.conflict('The last active Super Admin cannot be removed or suspended');
   }
+}
+
+const ADMIN_ROLE_LOCK_ID = 'platform-role-membership';
+const ADMIN_ROLE_RETRY_LIMIT = 5;
+
+function isRetryableRoleLockError(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    (error.code === 'P2034' || error.code === 'P2002')
+  );
+}
+
+/**
+ * Runs a privileged role change as a serialized transaction. MongoDB write
+ * conflicts on the lock document are retried so the loser re-reads the active
+ * administrator count instead of committing a write-skew decision.
+ */
+async function withAdminRoleLock<T>(
+  operation: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < ADMIN_ROLE_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        await tx.platformLock.upsert({
+          where: { id: ADMIN_ROLE_LOCK_ID },
+          create: { id: ADMIN_ROLE_LOCK_ID, version: 0 },
+          update: { version: { increment: 1 } },
+        });
+        return operation(tx);
+      });
+    } catch (error) {
+      if (isRetryableRoleLockError(error) && attempt < ADMIN_ROLE_RETRY_LIMIT - 1) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError ?? AppError.conflict('Account administration is busy. Try again.');
 }
 
 async function cleanupUserOperationalState(
@@ -290,13 +331,18 @@ export async function updateUser(
 }
 
 export async function suspendUser(actorId: string, userId: string, reason: string, req: Request) {
-  await assertNotLastSuperAdmin(userId);
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw AppError.notFound('User not found');
   if (accountStatusOf(user) === 'DELETED' || accountStatusOf(user) === 'SUSPENDED') {
     throw AppError.conflict('This account cannot be suspended from its current state');
   }
-  const { sessions } = await prisma.$transaction(async (tx) => {
+  const { sessions } = await withAdminRoleLock(async (tx) => {
+    await assertNotLastSuperAdmin(tx, userId);
+    const current = await tx.user.findUnique({ where: { id: userId } });
+    if (!current) throw AppError.notFound('User not found');
+    if (accountStatusOf(current) === 'DELETED' || accountStatusOf(current) === 'SUSPENDED') {
+      throw AppError.conflict('This account cannot be suspended from its current state');
+    }
     await tx.user.update({
       where: { id: userId },
       data: { accountStatus: 'SUSPENDED' },
@@ -356,7 +402,6 @@ export async function reactivateUser(actorId: string, userId: string, req: Reque
 }
 
 export async function deleteUser(actorId: string, userId: string, reason: string, req: Request) {
-  await assertNotLastSuperAdmin(userId);
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: { ownedClubs: { where: { archivedAt: null }, select: { id: true, name: true } } },
@@ -366,7 +411,19 @@ export async function deleteUser(actorId: string, userId: string, reason: string
   if (user.ownedClubs.length > 0) {
     throw AppError.conflict('Transfer ownership of active clubs before deleting this account');
   }
-  await prisma.$transaction(async (tx) => {
+  await withAdminRoleLock(async (tx) => {
+    await assertNotLastSuperAdmin(tx, userId);
+    const current = await tx.user.findUnique({
+      where: { id: userId },
+      include: { ownedClubs: { where: { archivedAt: null }, select: { id: true, name: true } } },
+    });
+    if (!current) throw AppError.notFound('User not found');
+    if (accountStatusOf(current) === 'DELETED') {
+      throw AppError.conflict('Account is already deleted');
+    }
+    if (current.ownedClubs.length > 0) {
+      throw AppError.conflict('Transfer ownership of active clubs before deleting this account');
+    }
     await tx.user.update({
       where: { id: userId },
       data: {

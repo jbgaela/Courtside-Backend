@@ -677,3 +677,13 @@ model AdministrativeAuditEvent {
   @@index([action, createdAt])
 }
 
+/// Serializes privileged platform-role changes. MongoDB transactions use
+/// snapshot isolation, so a shared document write is required to prevent
+/// write-skew (for example, two Super Admins suspending each other at once).
+model PlatformLock {
+  id        String   @id @map("_id")
+  version   Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+

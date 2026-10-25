@@ -1,10 +1,35 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { prisma } from '../../src/infrastructure/prisma.js';
-import { previewRotation, setupLiveSession } from './helpers.js';
+import { previewRotation, setupLiveSession, type TestUser } from './helpers.js';
 
 afterAll(async () => {
   await prisma.$disconnect();
 });
+
+interface MatchBody {
+  id: string;
+  status: string;
+  version: number;
+}
+
+async function startAndScoreToWinningState(actor: TestUser, matchId: string): Promise<number> {
+  const started = await actor.agent
+    .post(`/api/v1/matches/${matchId}/start`)
+    .set('x-csrf-token', actor.csrf)
+    .send({})
+    .expect(200);
+  let version = started.body.data.match.version as number;
+  for (let point = 1; point <= 11; point += 1) {
+    const response = await actor.agent
+      .post(`/api/v1/matches/${matchId}/score-events`)
+      .set('x-csrf-token', actor.csrf)
+      .set('idempotency-key', `dual-${matchId}-${point}`)
+      .send({ team: 'A', expectedVersion: version })
+      .expect(201);
+    version = response.body.data.match.version as number;
+  }
+  return version;
+}
 
 describe('concurrent operations', () => {
   it('allows exactly one of two simultaneous rotation commits', async () => {
@@ -173,5 +198,63 @@ describe('concurrent operations', () => {
       where: { sessionId: setup.session.id, gamesPlayed: 1 },
     });
     expect(queueCount).toBe(4);
+  });
+
+  it('auto-rotates both courts when two matches finish at the same time', async () => {
+    const setup = await setupLiveSession(8, 2, { autoAssign: true });
+    const preview = await previewRotation(setup.owner, setup.session.id);
+    const committed = await setup.owner.agent
+      .post(`/api/v1/sessions/${setup.session.id}/rotations/commit`)
+      .set('x-csrf-token', setup.owner.csrf)
+      .send({
+        rotationId: preview.rotationId,
+        expectedSessionVersion: preview.sessionVersion,
+      })
+      .expect(201);
+    const matches = committed.body.data.matches as MatchBody[];
+    expect(matches).toHaveLength(2);
+
+    const versions = await Promise.all(
+      matches.map((match) => startAndScoreToWinningState(setup.owner, match.id)),
+    );
+
+    const completions = await Promise.all(
+      matches.map((match, index) =>
+        setup.owner.agent
+          .post(`/api/v1/matches/${match.id}/complete`)
+          .set('x-csrf-token', setup.owner.csrf)
+          .set('idempotency-key', `dual-complete-${match.id}`)
+          .send({ expectedVersion: versions[index] }),
+      ),
+    );
+    expect(completions.map((response) => response.status)).toEqual([201, 201]);
+    let active: Array<{
+      id: string;
+      courtId: string;
+      participants: Array<{ userId: string | null }>;
+    }> = [];
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      active = await prisma.match.findMany({
+        where: { sessionId: setup.session.id, status: 'READY' },
+        select: {
+          id: true,
+          courtId: true,
+          participants: { select: { userId: true } },
+        },
+      });
+      if (active.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    expect(active).toHaveLength(2);
+    const playerIds = active.flatMap((match) =>
+      match.participants.map((participant) => participant.userId),
+    );
+    expect(new Set(playerIds).size).toBe(8);
+    expect(new Set(active.map((match) => match.courtId)).size).toBe(2);
+    const playingQueueEntries = await prisma.queueEntry.count({
+      where: { sessionId: setup.session.id, state: 'PLAYING' },
+    });
+    expect(playingQueueEntries).toBe(8);
   });
 });

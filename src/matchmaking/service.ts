@@ -924,7 +924,24 @@ export async function cancelPreview(
   return { cancelled: true };
 }
 
-export async function maybeAutoRotate(sessionId: string): Promise<void> {
+const autoRotationChains = new Map<string, Promise<void>>();
+
+/**
+ * Automatic rotation is triggered once per completed match. Completing two
+ * courts at the same instant previously produced two previews that cancelled
+ * each other, leaving no new match. Serializing per session makes the second
+ * trigger run against the committed state of the first.
+ */
+export function maybeAutoRotate(sessionId: string): Promise<void> {
+  const previous = autoRotationChains.get(sessionId) ?? Promise.resolve();
+  const run = previous.then(() => runAutoRotation(sessionId));
+  autoRotationChains.set(sessionId, run);
+  return run.finally(() => {
+    if (autoRotationChains.get(sessionId) === run) autoRotationChains.delete(sessionId);
+  });
+}
+
+async function runAutoRotation(sessionId: string): Promise<void> {
   try {
     const session = await prisma.playSession.findUnique({ where: { id: sessionId } });
     if (!session || session.status !== 'LIVE') return;

@@ -104,4 +104,52 @@ describe('runSimulation', () => {
       expect(game.teamBUserIds).toHaveLength(1);
     }
   });
+
+  it('never reports court utilisation above 100% after warm-up', () => {
+    for (const seed of [3, 21, 99]) {
+      const report = runSimulation({
+        seed,
+        players: roster(30),
+        courtCount: 3,
+        rounds: 20,
+        warmupRounds: 5,
+      });
+      expect(report.courtUtilization, `seed ${seed}`).toBeLessThanOrEqual(1);
+      expect(report.courtUtilization, `seed ${seed}`).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('keeps a 100-player, 8-court soak fair across deterministic seeds', () => {
+    for (const seed of [11, 22, 33]) {
+      const report = runSimulation({
+        seed,
+        players: roster(100, 'wide'),
+        courtCount: 8,
+        rounds: 60,
+        warmupRounds: 5,
+      });
+      expect(report.maxPlayDisparity, `seed ${seed}`).toBeLessThanOrEqual(3);
+      expect(report.starvationIncidents, `seed ${seed}`).toBe(0);
+      expect(report.courtUtilization, `seed ${seed}`).toBeGreaterThan(0.9);
+      expect(
+        report.perPlayer.every((player) => player.gamesPlayed > 0),
+        `seed ${seed}`,
+      ).toBe(true);
+    }
+  });
+
+  it('keeps a 50-player, 4-court session fair under a mixed skill pool', () => {
+    for (const seed of [101, 202, 303]) {
+      const report = runSimulation({
+        seed,
+        players: roster(50, 'wide'),
+        courtCount: 4,
+        rounds: 48,
+        warmupRounds: 4,
+      });
+      expect(report.maxPlayDisparity, `seed ${seed}`).toBeLessThanOrEqual(3);
+      expect(report.starvationIncidents, `seed ${seed}`).toBe(0);
+      expect(report.courtUtilization, `seed ${seed}`).toBeGreaterThan(0.85);
+    }
+  });
 });

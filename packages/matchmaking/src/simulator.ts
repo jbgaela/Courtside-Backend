@@ -160,7 +160,7 @@ export function runSimulation(options: SimulationOptions): SimulationReport {
     inputHashes.push(hashInput(input));
 
     for (const warning of result.warnings) warnings.add(warning);
-    assignmentSlots += result.assignments.length;
+    if (round > warmup) assignmentSlots += result.assignments.length;
 
     for (const player of players) {
       if (!player.checkedIn || player.paused || player.left) continue;

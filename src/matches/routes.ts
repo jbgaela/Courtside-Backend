@@ -6,6 +6,7 @@ import { param } from '../http/params.js';
 import { validateBody } from '../http/validate.js';
 import { requestMetadata } from '../http/middleware/request-id.js';
 import { withIdempotency } from '../http/idempotency.js';
+import { withWriteConflictRetry } from '../http/transaction-retry.js';
 import {
   completeMatchSchema,
   correctionSchema,
@@ -96,11 +97,13 @@ matchesRouter.post(
       endpoint: `POST /matches/${matchId}/complete`,
       request: req.body,
       action: async () => {
-        const data = await completeMatch(
-          matchId,
-          auth.user.id,
-          { expectedVersion: req.body.expectedVersion },
-          requestMetadata(req),
+        const data = await withWriteConflictRetry(() =>
+          completeMatch(
+            matchId,
+            auth.user.id,
+            { expectedVersion: req.body.expectedVersion },
+            requestMetadata(req),
+          ),
         );
         return { data, statusCode: data.alreadyCompleted ? 200 : 201 };
       },
@@ -139,7 +142,9 @@ matchesRouter.post(
       endpoint: `POST /matches/${matchId}/correction`,
       request: req.body,
       action: async () => ({
-        data: await correctMatch(matchId, auth.user.id, req.body, requestMetadata(req)),
+        data: await withWriteConflictRetry(() =>
+          correctMatch(matchId, auth.user.id, req.body, requestMetadata(req)),
+        ),
       }),
     });
     sendData(res, result.data, result.statusCode);

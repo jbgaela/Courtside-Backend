@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type SessionRegistration } from '@prisma/client';
 import { AppError } from '../http/errors.js';
 import { prisma } from '../infrastructure/prisma.js';
 import { writeAudit } from '../audit/audit.js';
@@ -18,8 +18,29 @@ function isAdminRole(role: string): boolean {
   return role === 'OWNER' || role === 'QUEUE_MASTER';
 }
 
-async function activeParticipantCount(sessionId: string): Promise<number> {
-  return countActiveParticipants(sessionId);
+async function activeParticipantCount(
+  sessionId: string,
+  tx?: Prisma.TransactionClient,
+): Promise<number> {
+  return countActiveParticipants(sessionId, tx);
+}
+
+const CAPACITY_RETRY_LIMIT = 6;
+
+/**
+ * MongoDB aborts a transaction that writes a document another transaction
+ * committed after its snapshot. Registration retries then re-read the
+ * participant count and either take the last slot or fail with "full".
+ */
+function isRetryableCapacityError(error: unknown): boolean {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+    return true;
+  }
+  return error instanceof Error && /write conflict|deadlock/i.test(error.message);
+}
+
+async function pauseBeforeRetry(attempt: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 15 * (attempt + 1)));
 }
 
 async function ensureClubMember(sessionClubId: string, userId: string) {
@@ -60,47 +81,104 @@ export async function registerForSession(
     throw AppError.conflict('This session is full');
   }
 
-  const status = session.registrationPolicy === 'APPROVAL' ? 'PENDING' : 'REGISTERED';
-  const registration = await prisma.sessionRegistration.upsert({
-    where: { sessionId_userId: { sessionId, userId } },
-    update: {
-      status,
-      registeredAt: new Date(),
-      respondedAt: null,
-      approvedById: null,
-      checkedInAt: null,
-      checkInMethod: null,
-      notes: note ?? null,
-    },
-    create: {
-      sessionId,
-      userId,
-      status,
-      notes: note ?? null,
-    },
-  });
-  const version = await bumpVersion(sessionId);
-  await writeAudit(prisma, {
-    clubId: session.clubId,
-    sessionId,
-    actorId: userId,
-    action: status === 'PENDING' ? 'session.registration_requested' : 'session.registered',
-    entityType: 'SessionRegistration',
-    entityId: registration.id,
-    summary: status === 'PENDING' ? 'Registration requested' : 'Registered for session',
-    ip: meta.ip,
-    userAgent: meta.userAgent,
-  });
+  let committed: {
+    registration: SessionRegistration;
+    version: number;
+  } | null = null;
+
+  for (let attempt = 0; attempt < CAPACITY_RETRY_LIMIT && !committed; attempt += 1) {
+    try {
+      committed = await prisma.$transaction(async (tx) => {
+        // Re-read the session inside the transaction: status, policy and
+        // capacity are invariants of this write, not of the earlier request.
+        const current = await tx.playSession.findUnique({ where: { id: sessionId } });
+        if (!current) throw AppError.notFound('Session not found');
+        if (['DRAFT', 'COMPLETED', 'CANCELLED'].includes(current.status)) {
+          throw AppError.conflict('Registration is not open for this session');
+        }
+        if (current.status === 'LIVE' && !current.allowLateArrivals) {
+          throw AppError.conflict('Late registration is disabled for this session');
+        }
+        if (current.registrationPolicy === 'INVITE_ONLY') {
+          throw AppError.forbidden('This session is invite-only. Ask a Queue Master to add you.');
+        }
+        const status = current.registrationPolicy === 'APPROVAL' ? 'PENDING' : 'REGISTERED';
+
+        const concurrent = await tx.sessionRegistration.findUnique({
+          where: { sessionId_userId: { sessionId, userId } },
+        });
+        if (concurrent && ['PENDING', 'REGISTERED', 'CHECKED_IN'].includes(concurrent.status)) {
+          throw AppError.conflict('You are already registered for this session');
+        }
+        if ((await activeParticipantCount(sessionId, tx)) >= current.capacity) {
+          throw AppError.conflict('This session is full');
+        }
+
+        const registration = await tx.sessionRegistration.upsert({
+          where: { sessionId_userId: { sessionId, userId } },
+          update: {
+            status,
+            registeredAt: new Date(),
+            respondedAt: null,
+            approvedById: null,
+            checkedInAt: null,
+            checkInMethod: null,
+            notes: note ?? null,
+          },
+          create: {
+            sessionId,
+            userId,
+            status,
+            notes: note ?? null,
+          },
+        });
+        // The session version write is the capacity lock: concurrent
+        // registrations for this session conflict, retry, and then observe
+        // the new participant count instead of overbooking.
+        const updatedSession = await tx.playSession.update({
+          where: { id: sessionId },
+          data: { version: { increment: 1 } },
+          select: { version: true },
+        });
+        await writeAudit(tx, {
+          clubId: current.clubId,
+          sessionId,
+          actorId: userId,
+          action: status === 'PENDING' ? 'session.registration_requested' : 'session.registered',
+          entityType: 'SessionRegistration',
+          entityId: registration.id,
+          summary: status === 'PENDING' ? 'Registration requested' : 'Registered for session',
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+        });
+        return { registration, version: updatedSession.version };
+      });
+    } catch (error) {
+      if (isRetryableCapacityError(error) && attempt < CAPACITY_RETRY_LIMIT - 1) {
+        await pauseBeforeRetry(attempt);
+        continue;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw AppError.conflict('You are already registered for this session');
+      }
+      throw error;
+    }
+  }
+
+  if (!committed) {
+    throw AppError.conflict('Registration is busy. Refresh and try again.');
+  }
+
   publishSessionEvent({
     sessionId,
     publicId: session.publicId,
     type: 'queue.updated',
-    version,
+    version: committed.version,
   });
   return {
-    id: registration.id,
-    status: registration.status,
-    version,
+    id: committed.registration.id,
+    status: committed.registration.status,
+    version: committed.version,
   };
 }
 
@@ -322,120 +400,185 @@ export async function checkInPlayer(
 
   await ensureClubMember(access.session.clubId, targetUserId);
 
-  let registration = await prisma.sessionRegistration.findUnique({
-    where: { sessionId_userId: { sessionId, userId: targetUserId } },
-    include: { user: { include: { profile: true } } },
-  });
-  // Registered players keep their registration-based eligibility. Guests are
-  // created and checked in through the guest endpoints instead.
-
-  if (!registration) {
-    if (!isAdmin) throw AppError.badRequest('Register for this session before checking in');
-    if ((await activeParticipantCount(sessionId)) >= access.session.capacity) {
-      throw AppError.conflict('This session is full');
-    }
-    registration = await prisma.sessionRegistration.create({
-      data: {
-        sessionId,
-        userId: targetUserId,
-        status: 'REGISTERED',
-        approvedById: actorId,
-        notes: input.reason ?? 'Walk-in added by Queue Master',
-      },
-      include: { user: { include: { profile: true } } },
-    });
-  }
-  if (registration.status === 'PENDING') {
-    throw AppError.conflict('This registration is awaiting Queue Master approval');
-  }
-  if (['REJECTED', 'NO_SHOW'].includes(registration.status)) {
-    throw AppError.conflict('This registration cannot check in');
-  }
-  if (registration.status === 'WITHDRAWN' && !isAdmin) {
-    throw AppError.conflict('This registration was withdrawn. Register again first.');
-  }
-
-  const existingQueue = await prisma.queueEntry.findUnique({
-    where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
-  });
-  if (registration.status === 'CHECKED_IN' && existingQueue && existingQueue.state !== 'LEFT') {
-    return {
-      alreadyCheckedIn: true,
-      registration: registrationDto(registration, existingQueue.state),
-      version: access.session.version,
-    };
-  }
-
   const method = isAdmin ? 'MANAGER' : input.method === 'QR' ? 'QR' : 'SELF';
   const now = new Date();
-  const result = await prisma.$transaction(async (tx) => {
-    const updatedRegistration = await tx.sessionRegistration.update({
-      where: { id: registration!.id },
-      data: {
-        status: 'CHECKED_IN',
-        checkedInAt: registration!.checkedInAt ?? now,
-        checkInMethod: method,
-      },
-      include: { user: { include: { profile: true } } },
-    });
-    const queue = await tx.queueEntry.upsert({
-      where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
-      update: {
-        state: 'WAITING',
-        waitingSince: now,
-        accumulatedWaitMs: 0,
-        currentMatchId: null,
-        pausedAt: null,
-        restUntil: null,
-        version: { increment: 1 },
-      },
-      create: {
-        sessionId,
-        participantId: targetUserId,
-        participantType: 'REGISTERED',
-        userId: targetUserId,
-        state: 'WAITING',
-        waitingSince: now,
-        accumulatedWaitMs: 0,
-      },
-    });
-    const session = await tx.playSession.update({
-      where: { id: sessionId },
-      data: { version: { increment: 1 } },
-      select: { version: true },
-    });
-    await writeAudit(tx, {
-      clubId: access.session.clubId,
-      sessionId,
-      actorId,
-      action: isSelf ? 'checkin.self' : 'checkin.manager',
-      entityType: 'QueueEntry',
-      entityId: queue.id,
-      summary: `${updatedRegistration.user.profile?.displayName ?? updatedRegistration.user.name} checked in`,
-      metadata: { method, targetUserId, reason: input.reason ?? null, override: !isSelf },
-      ip: meta.ip,
-      userAgent: meta.userAgent,
-    });
-    return { registration: updatedRegistration, queue, version: session.version };
-  });
+  let result: {
+    alreadyCheckedIn: boolean;
+    registration: SessionRegistration & {
+      user: {
+        id: string;
+        name: string;
+        email: string;
+        profile: { displayName: string; skillRating: number } | null;
+      };
+    };
+    queue: { id: string; state: string; gamesPlayed: number; waitingSince: Date };
+    version: number;
+  } | null = null;
 
-  publishSessionEvent({
-    sessionId,
-    publicId: access.session.publicId,
-    type: 'queue.player_checked_in',
-    version: result.version,
-    payload: { userId: targetUserId },
-    publicPayload: { checkedIn: true },
-  });
+  for (let attempt = 0; attempt < CAPACITY_RETRY_LIMIT && !result; attempt += 1) {
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        const current = await tx.playSession.findUnique({ where: { id: sessionId } });
+        if (!current) throw AppError.notFound('Session not found');
+        if (['DRAFT', 'SCHEDULED', 'COMPLETED', 'CANCELLED'].includes(current.status)) {
+          throw AppError.conflict('Check-in is not open for this session');
+        }
+        if (current.status === 'LIVE' && !current.allowLateArrivals) {
+          throw AppError.conflict('Late check-in is disabled for this session');
+        }
+
+        let registration = await tx.sessionRegistration.findUnique({
+          where: { sessionId_userId: { sessionId, userId: targetUserId } },
+          include: { user: { include: { profile: true } } },
+        });
+        if (!registration) {
+          if (!isAdmin) throw AppError.badRequest('Register for this session before checking in');
+          if ((await activeParticipantCount(sessionId, tx)) >= current.capacity) {
+            throw AppError.conflict('This session is full');
+          }
+          registration = await tx.sessionRegistration.create({
+            data: {
+              sessionId,
+              userId: targetUserId,
+              status: 'REGISTERED',
+              approvedById: actorId,
+              notes: input.reason ?? 'Walk-in added by Queue Master',
+            },
+            include: { user: { include: { profile: true } } },
+          });
+        }
+        if (registration.status === 'PENDING') {
+          throw AppError.conflict('This registration is awaiting Queue Master approval');
+        }
+        if (['REJECTED', 'NO_SHOW'].includes(registration.status)) {
+          throw AppError.conflict('This registration cannot check in');
+        }
+        if (registration.status === 'WITHDRAWN' && !isAdmin) {
+          throw AppError.conflict('This registration was withdrawn. Register again first.');
+        }
+        if (
+          registration.status !== 'CHECKED_IN' &&
+          registration.status !== 'REGISTERED' &&
+          registration.status !== 'PENDING' &&
+          (await activeParticipantCount(sessionId, tx)) >= current.capacity
+        ) {
+          throw AppError.conflict('This session is full');
+        }
+
+        const existingQueue = await tx.queueEntry.findUnique({
+          where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
+        });
+        if (
+          registration.status === 'CHECKED_IN' &&
+          existingQueue &&
+          existingQueue.state !== 'LEFT'
+        ) {
+          return {
+            alreadyCheckedIn: true,
+            registration,
+            queue: existingQueue,
+            version: current.version,
+          };
+        }
+
+        const updatedRegistration = await tx.sessionRegistration.update({
+          where: { id: registration.id },
+          data: {
+            status: 'CHECKED_IN',
+            checkedInAt: registration.checkedInAt ?? now,
+            checkInMethod: method,
+          },
+          include: { user: { include: { profile: true } } },
+        });
+        const queue = await tx.queueEntry.upsert({
+          where: { sessionId_participantId: { sessionId, participantId: targetUserId } },
+          update: {
+            state: 'WAITING',
+            waitingSince: now,
+            accumulatedWaitMs: 0,
+            currentMatchId: null,
+            pausedAt: null,
+            restUntil: null,
+            version: { increment: 1 },
+          },
+          create: {
+            sessionId,
+            participantId: targetUserId,
+            participantType: 'REGISTERED',
+            userId: targetUserId,
+            state: 'WAITING',
+            waitingSince: now,
+            accumulatedWaitMs: 0,
+          },
+        });
+        const session = await tx.playSession.update({
+          where: { id: sessionId },
+          data: { version: { increment: 1 } },
+          select: { version: true },
+        });
+        await writeAudit(tx, {
+          clubId: current.clubId,
+          sessionId,
+          actorId,
+          action: isSelf ? 'checkin.self' : 'checkin.manager',
+          entityType: 'QueueEntry',
+          entityId: queue.id,
+          summary: `${updatedRegistration.user.profile?.displayName ?? updatedRegistration.user.name} checked in`,
+          metadata: { method, targetUserId, reason: input.reason ?? null, override: !isSelf },
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+        });
+        return {
+          alreadyCheckedIn: false,
+          registration: updatedRegistration,
+          queue,
+          version: session.version,
+        };
+      });
+    } catch (error) {
+      if (isRetryableCapacityError(error) && attempt < CAPACITY_RETRY_LIMIT - 1) {
+        await pauseBeforeRetry(attempt);
+        continue;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        if (attempt < CAPACITY_RETRY_LIMIT - 1) {
+          await pauseBeforeRetry(attempt);
+          continue;
+        }
+        throw AppError.conflict('Check-in is already in progress. Refresh and try again.');
+      }
+      throw error;
+    }
+  }
+
+  if (!result) {
+    throw AppError.conflict('Check-in is busy. Refresh and try again.');
+  }
+
+  if (!result.alreadyCheckedIn) {
+    publishSessionEvent({
+      sessionId,
+      publicId: access.session.publicId,
+      type: 'queue.player_checked_in',
+      version: result.version,
+      payload: { userId: targetUserId },
+      publicPayload: { checkedIn: true },
+    });
+  }
   return {
-    alreadyCheckedIn: false,
+    alreadyCheckedIn: result.alreadyCheckedIn,
     registration: registrationDto(result.registration, result.queue.state),
-    queueEntry: {
-      id: result.queue.id,
-      state: result.queue.state,
-      gamesPlayed: result.queue.gamesPlayed,
-      waitingSince: result.queue.waitingSince.toISOString(),
-    },
+    ...(result.alreadyCheckedIn
+      ? {}
+      : {
+          queueEntry: {
+            id: result.queue.id,
+            state: result.queue.state,
+            gamesPlayed: result.queue.gamesPlayed,
+            waitingSince: result.queue.waitingSince.toISOString(),
+          },
+        }),
     version: result.version,
   };
 }
@@ -443,15 +586,6 @@ export async function checkInPlayer(
 export async function qrCheckIn(token: string, actorId: string, meta: AuditMeta) {
   const session = await getSessionByCheckInToken(token);
   return checkInPlayer(session.id, actorId, { method: 'QR' }, meta);
-}
-
-async function bumpVersion(sessionId: string): Promise<number> {
-  const updated = await prisma.playSession.update({
-    where: { id: sessionId },
-    data: { version: { increment: 1 } },
-    select: { version: true },
-  });
-  return updated.version;
 }
 
 export async function queueSnapshot(sessionId: string, userId: string) {

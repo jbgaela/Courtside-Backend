@@ -89,6 +89,10 @@ export function createInitialScoreState(
 
 export function isGameWon(scoreA: number, scoreB: number, config: ScoringConfig): boolean {
   if (scoreA < 0 || scoreB < 0) return false;
+  // A tie is never a completed game, including at the point cap. Live scoring
+  // cannot produce a tie at the cap (the game ends when the cap is reached),
+  // but corrections accept arbitrary scores and must not invent a winner.
+  if (scoreA === scoreB) return false;
   const high = Math.max(scoreA, scoreB);
   const low = Math.min(scoreA, scoreB);
   if (config.pointCap !== null && high >= config.pointCap) return true;

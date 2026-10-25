@@ -1,4 +1,4 @@
-# PickleQueue API
+﻿# PickleQueue API
 
 Express 5 + TypeScript + Prisma 6.19 + MongoDB 7 API for PickleQueue.
 
@@ -68,10 +68,10 @@ and `test` already do that automatically.
 
 Password: `PickleQueue123!`
 
-- `owner@picklequeue.dev` — owner / Queue Master
-- `alex@picklequeue.dev` — player
-- `zoe@picklequeue.dev` — player
-- `jordan@picklequeue.dev` — Queue Master
+- `owner@picklequeue.dev` â€” owner / Queue Master
+- `alex@picklequeue.dev` â€” player
+- `zoe@picklequeue.dev` â€” player
+- `jordan@picklequeue.dev` â€” Queue Master
 
 Seed data is development/test only. See `.env.example` and the security
 runbooks before any production deployment.
@@ -97,3 +97,4 @@ rebuilds them before `tsc`. Set the variables from `.env.example` in the hosting
 environment and use a MongoDB replica set. Production must use
 `EXPOSE_DEV_TOKENS=false`, `COOKIE_SECURE=true`, HTTPS origins and the
 deployment-specific secrets required by the security runbook.
+

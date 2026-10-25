@@ -46,9 +46,7 @@ export function clearRegistrationCookie(res: Response): void {
   res.clearCookie(REGISTRATION_COOKIE_NAME, options);
 }
 
-export function readRegistrationCookie(
-  cookies: Record<string, string | undefined>,
-): string | null {
+export function readRegistrationCookie(cookies: Record<string, string | undefined>): string | null {
   return cookies[REGISTRATION_COOKIE_NAME] ?? null;
 }
 

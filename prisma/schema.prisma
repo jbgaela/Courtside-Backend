@@ -17,42 +17,42 @@ model User {
   passwordHash    String
   name            String
   emailVerifiedAt DateTime?
-  platformRole    String    @default("USER")
-  accountStatus   String    @default("ACTIVE")
+  platformRole    String   @default("USER")
+  accountStatus   String   @default("ACTIVE")
   activatedAt     DateTime?
   deletedAt       DateTime?
   termsAcceptedAt DateTime?
-  sessionVersion  Int       @default(0)
-  mfaEnabled      Boolean   @default(false)
+  sessionVersion  Int      @default(0)
+  mfaEnabled      Boolean  @default(false)
   mfaSecret       String?
   mfaEnrolledAt   DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  profile               PlayerProfile?
-  authSessions          AuthSession[]
-  emailTokens           EmailToken[]
-  registrationReview    RegistrationReview?
-  registrationSessions  RegistrationSession[]
-  mfaChallenges         MfaChallenge[]
-  accountClaimTokens    AccountClaimToken[]
-  accountRecoveryTokens AccountRecoveryToken[]
-  reviewedRegistrations RegistrationReview[]       @relation("RegistrationReviewer")
-  memberships           ClubMembership[]
-  ownedClubs            Club[]                     @relation("ClubOwner")
-  createdInvitations    ClubInvitation[]           @relation("InvitationCreator")
-  acceptedInvitations   ClubInvitation[]           @relation("InvitationAccepted")
-  createdSessions       PlaySession[]              @relation("SessionCreator")
-  sessionRegistrations  SessionRegistration[]
-  queueEntries          QueueEntry[]
-  skillRatings          SkillRating[]
-  matchParticipants     MatchParticipant[]
-  scoreEvents           ScoreEvent[]
-  auditEvents           AuditEvent[]               @relation("AuditActor")
-  adminAuditEvents      AdministrativeAuditEvent[] @relation("AdminAuditActor")
-  adminAuditTargets     AdministrativeAuditEvent[] @relation("AdminAuditTarget")
-  notifications         Notification[]
-  createdGuests         SessionGuest[]             @relation("GuestCreator")
+  profile                   PlayerProfile?
+  authSessions              AuthSession[]
+  emailTokens               EmailToken[]
+  registrationReview        RegistrationReview?
+  registrationSessions      RegistrationSession[]
+  mfaChallenges             MfaChallenge[]
+  accountClaimTokens        AccountClaimToken[]
+  accountRecoveryTokens     AccountRecoveryToken[]
+  reviewedRegistrations     RegistrationReview[]      @relation("RegistrationReviewer")
+  memberships               ClubMembership[]
+  ownedClubs                Club[]                    @relation("ClubOwner")
+  createdInvitations        ClubInvitation[]          @relation("InvitationCreator")
+  acceptedInvitations       ClubInvitation[]          @relation("InvitationAccepted")
+  createdSessions           PlaySession[]             @relation("SessionCreator")
+  createdGuests             SessionGuest[]             @relation("GuestCreator")
+  sessionRegistrations      SessionRegistration[]
+  queueEntries              QueueEntry[]
+  skillRatings              SkillRating[]
+  matchParticipants         MatchParticipant[]
+  scoreEvents               ScoreEvent[]
+  auditEvents               AuditEvent[]              @relation("AuditActor")
+  adminAuditEvents          AdministrativeAuditEvent[] @relation("AdminAuditActor")
+  adminAuditTargets         AdministrativeAuditEvent[] @relation("AdminAuditTarget")
+  notifications             Notification[]
 
   @@index([emailVerifiedAt])
   @@index([platformRole, accountStatus])
@@ -76,17 +76,17 @@ model PlayerProfile {
 }
 
 model AuthSession {
-  id                String    @id @default(auto()) @map("_id") @db.ObjectId
-  userId            String    @db.ObjectId
-  tokenHash         String    @unique
-  csrfToken         String
-  expiresAt         DateTime
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  csrfToken  String
+  expiresAt  DateTime
   revokedAt         DateTime?
-  lastUsedAt        DateTime  @default(now())
+  lastUsedAt        DateTime @default(now())
   reauthenticatedAt DateTime?
   ip                String?
-  userAgent         String?
-  createdAt         DateTime  @default(now())
+  userAgent  String?
+  createdAt  DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -638,14 +638,14 @@ model AccountClaimToken {
 }
 
 model AccountRecoveryToken {
-  id          String    @id @default(auto()) @map("_id") @db.ObjectId
-  userId      String    @db.ObjectId
-  tokenHash   String    @unique
-  expiresAt   DateTime
-  consumedAt  DateTime?
-  revokedAt   DateTime?
-  createdById String?   @db.ObjectId
-  createdAt   DateTime  @default(now())
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  revokedAt  DateTime?
+  createdById String?  @db.ObjectId
+  createdAt  DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -676,3 +676,4 @@ model AdministrativeAuditEvent {
   @@index([targetUserId, createdAt])
   @@index([action, createdAt])
 }
+

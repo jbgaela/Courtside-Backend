@@ -45,6 +45,7 @@ export interface MatchmakingInput {
 export interface SelectedPlayer {
   queueEntryId: string;
   userId: string;
+  participantType?: 'REGISTERED' | 'GUEST';
   displayName: string;
   skill: number;
   gamesPlayed: number;

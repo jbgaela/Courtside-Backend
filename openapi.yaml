@@ -1359,7 +1359,15 @@ paths:
           in: query
           schema:
             type: string
-            enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+            enum:
+              [
+                PENDING_APPROVAL,
+                APPROVED_PENDING_ACTIVATION,
+                ACTIVE,
+                SUSPENDED,
+                DEACTIVATED,
+                DELETED,
+              ]
         - name: page
           in: query
           schema: { type: integer, minimum: 1, default: 1 }
@@ -1606,7 +1614,8 @@ components:
         email: { type: string, format: email }
         accountStatus:
           type: string
-          enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+          enum:
+            [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
         registrationStatus:
           type: [string, 'null']
           enum: [PENDING, APPROVED, REJECTED, null]
@@ -1627,7 +1636,8 @@ components:
         platformRole: { type: string, enum: [USER, SUPER_ADMIN] }
         accountStatus:
           type: string
-          enum: [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
+          enum:
+            [PENDING_APPROVAL, APPROVED_PENDING_ACTIVATION, ACTIVE, SUSPENDED, DEACTIVATED, DELETED]
         activatedAt: { type: [string, 'null'], format: date-time }
         profile:
           type: object

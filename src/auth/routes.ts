@@ -10,12 +10,7 @@ import {
   setSessionCookie,
 } from '../auth/cookies.js';
 import { createAuthSession } from '../auth/session.js';
-import {
-  enableMfa,
-  getMfaStatus,
-  setupMfa,
-  verifyMfaLogin,
-} from '../auth/mfa.js';
+import { enableMfa, getMfaStatus, setupMfa, verifyMfaLogin } from '../auth/mfa.js';
 import { isSuperAdmin } from '../accounts/state.js';
 import { sendData } from '../http/respond.js';
 import { asyncHandler } from '../http/async-handler.js';

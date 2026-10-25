@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+test-results
+pnpm-lock.yaml
+*.log
+.env
+.env.*
+!.env.example

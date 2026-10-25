@@ -20,6 +20,18 @@ export type AccountStatus = (typeof ACCOUNT_STATUSES)[number];
 export const REGISTRATION_REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
 export type RegistrationReviewStatus = (typeof REGISTRATION_REVIEW_STATUSES)[number];
 
+export const PARTICIPANT_TYPES = ['REGISTERED', 'GUEST'] as const;
+export type ParticipantType = (typeof PARTICIPANT_TYPES)[number];
+
+export const GUEST_GENDERS = ['MALE', 'FEMALE', 'NON_BINARY', 'PREFER_NOT_TO_SAY'] as const;
+export type GuestGender = (typeof GUEST_GENDERS)[number];
+
+export const GUEST_GENDER_LABELS: Record<GuestGender, string> = {
+  MALE: 'Male',
+  FEMALE: 'Female',
+  NON_BINARY: 'Non-binary',
+  PREFER_NOT_TO_SAY: 'Prefer not to say',
+};
 export const CLUB_ROLES = ['OWNER', 'QUEUE_MASTER', 'PLAYER'] as const;
 export type ClubRole = (typeof CLUB_ROLES)[number];
 
@@ -332,3 +344,4 @@ export function initials(name: string): string {
   if (parts.length === 1) return (parts[0] ?? '?').slice(0, 2).toUpperCase();
   return `${(parts[0] ?? '').charAt(0)}${(parts[parts.length - 1] ?? '').charAt(0)}`.toUpperCase();
 }
+

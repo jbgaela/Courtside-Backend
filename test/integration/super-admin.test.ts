@@ -258,9 +258,7 @@ describe('super admin registration approval and account lifecycle', () => {
       .expect(200);
     const rows = search.body.data.items as Array<{ id: string; email: string }>;
     expect(rows.some((row) => row.id === target.id)).toBe(true);
-    const filtered = await admin.agent
-      .get('/api/v1/admin/users?status=ACTIVE&limit=5')
-      .expect(200);
+    const filtered = await admin.agent.get('/api/v1/admin/users?status=ACTIVE&limit=5').expect(200);
     expect(filtered.body.data.meta.total).toBeGreaterThan(0);
 
     await admin.agent
@@ -436,10 +434,7 @@ describe('super admin registration approval and account lifecycle', () => {
     expect(login.body.data.mfaRequired).toBe(true);
     expect(login.body.data.user).toBeUndefined();
     await loginAgent.get('/api/v1/auth/me').expect(401);
-    await loginAgent
-      .post('/api/v1/auth/mfa/verify')
-      .send({ code: '000000' })
-      .expect(401);
+    await loginAgent.post('/api/v1/auth/mfa/verify').send({ code: '000000' }).expect(401);
     const verified = await loginAgent
       .post('/api/v1/auth/mfa/verify')
       .send({ code: totpCode(secret) })

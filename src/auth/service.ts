@@ -7,7 +7,11 @@ import { assertPasswordPolicy, hashPassword, verifyPassword } from '../security/
 import { randomToken, sha256 } from '../security/tokens.js';
 import { writeAudit } from '../audit/audit.js';
 import { createAuthSession, revokeAllSessions } from './session.js';
-import { createRegistrationSession, registrationView, revokeRegistrationSessions } from './registration-session.js';
+import {
+  createRegistrationSession,
+  registrationView,
+  revokeRegistrationSessions,
+} from './registration-session.js';
 import { toMe } from '../users/serializers.js';
 import type { Request } from 'express';
 import { requestMetadata } from '../http/middleware/request-id.js';
@@ -484,10 +488,7 @@ export async function claimAccount(
   };
 }
 
-export async function recoverAccount(
-  input: { token: string; password: string },
-  req: Request,
-) {
+export async function recoverAccount(input: { token: string; password: string }, req: Request) {
   assertPasswordPolicy(input.password);
   const now = new Date();
   const record = await prisma.accountRecoveryToken.findUnique({
@@ -620,12 +621,7 @@ export async function resetPassword(token: string, password: string) {
   assertPasswordPolicy(password);
   const record = await prisma.emailToken.findUnique({ where: { tokenHash: sha256(token) } });
   const now = new Date();
-  if (
-    !record ||
-    record.type !== 'RESET_PASSWORD' ||
-    record.usedAt ||
-    record.expiresAt <= now
-  ) {
+  if (!record || record.type !== 'RESET_PASSWORD' || record.usedAt || record.expiresAt <= now) {
     throw AppError.badRequest('This reset link is invalid or has expired');
   }
   const passwordHash = await hashPassword(password);

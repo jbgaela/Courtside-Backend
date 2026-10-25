@@ -289,12 +289,7 @@ export async function updateUser(
   return getDetail(userId);
 }
 
-export async function suspendUser(
-  actorId: string,
-  userId: string,
-  reason: string,
-  req: Request,
-) {
+export async function suspendUser(actorId: string, userId: string, reason: string, req: Request) {
   await assertNotLastSuperAdmin(userId);
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw AppError.notFound('User not found');
@@ -417,7 +412,9 @@ export async function restoreUser(actorId: string, userId: string, req: Request)
     throw AppError.conflict('A rejected registration must be reopened through the review workflow');
   }
   if (user.registrationReview?.status === 'PENDING') {
-    throw AppError.conflict('A pending registration must be reviewed before the account is restored');
+    throw AppError.conflict(
+      'A pending registration must be reviewed before the account is restored',
+    );
   }
   await prisma.$transaction(async (tx) => {
     await tx.user.update({
@@ -447,7 +444,8 @@ export async function restoreUser(actorId: string, userId: string, req: Request)
 export async function issueRecovery(actorId: string, userId: string, req: Request) {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw AppError.notFound('User not found');
-  if (accountStatusOf(user) === 'DELETED') throw AppError.conflict('Deleted accounts cannot be recovered');
+  if (accountStatusOf(user) === 'DELETED')
+    throw AppError.conflict('Deleted accounts cannot be recovered');
   const token = await issueRecoveryToken(userId, actorId);
   await writeAdminAudit({
     actorId,
@@ -517,7 +515,10 @@ export async function overview() {
   ] = await Promise.all([
     prisma.registrationReview.count({ where: { status: 'PENDING' } }),
     prisma.user.count({
-      where: { accountStatus: 'ACTIVE', OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }] },
+      where: {
+        accountStatus: 'ACTIVE',
+        OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }],
+      },
     }),
     prisma.user.count({ where: { accountStatus: 'SUSPENDED' } }),
     prisma.user.count({ where: { createdAt: { gte: since } } }),

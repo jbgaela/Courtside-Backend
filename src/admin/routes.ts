@@ -188,10 +188,7 @@ adminRouter.patch(
   validateBody(updateAdminUserSchema),
   asyncHandler(async (req, res) => {
     const auth = requireSuperAdmin(req);
-    sendData(
-      res,
-      await updateUser(auth.user.id, param(req, 'userId'), req.body, req),
-    );
+    sendData(res, await updateUser(auth.user.id, param(req, 'userId'), req.body, req));
   }),
 );
 
@@ -202,10 +199,7 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     requireDestructiveAdminReauth(req);
     const auth = requireSuperAdmin(req);
-    sendData(
-      res,
-      await suspendUser(auth.user.id, param(req, 'userId'), req.body.reason, req),
-    );
+    sendData(res, await suspendUser(auth.user.id, param(req, 'userId'), req.body.reason, req));
   }),
 );
 
@@ -291,5 +285,3 @@ adminRouter.get(
     sendData(res, await listAudit(query));
   }),
 );
-
-

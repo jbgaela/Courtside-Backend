@@ -90,8 +90,7 @@ export function registrationView(registration: RegistrationContext) {
     submittedAt: registration.review?.submittedAt.toISOString() ?? null,
     reviewedAt: registration.review?.reviewedAt?.toISOString() ?? null,
     publicReason: registration.review?.publicReason ?? null,
-    canActivate:
-      state.kind === 'RESTRICTED' && state.status === 'APPROVED_PENDING_ACTIVATION',
+    canActivate: state.kind === 'RESTRICTED' && state.status === 'APPROVED_PENDING_ACTIVATION',
     restricted: state.kind === 'RESTRICTED',
   };
 }

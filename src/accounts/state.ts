@@ -9,9 +9,7 @@ import {
 } from '@picklequeue/contracts';
 import type { RegistrationReview, User } from '@prisma/client';
 
-export function platformRoleOf(
-  user: Pick<User, 'platformRole'> | null | undefined,
-): PlatformRole {
+export function platformRoleOf(user: Pick<User, 'platformRole'> | null | undefined): PlatformRole {
   return user?.platformRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'USER';
 }
 
@@ -35,7 +33,9 @@ export function isActiveAccount(user: Pick<User, 'accountStatus'> | null | undef
   return accountStatusOf(user) === 'ACTIVE';
 }
 
-export function isSuperAdmin(user: Pick<User, 'platformRole' | 'accountStatus'> | null | undefined) {
+export function isSuperAdmin(
+  user: Pick<User, 'platformRole' | 'accountStatus'> | null | undefined,
+) {
   return platformRoleOf(user) === 'SUPER_ADMIN' && isActiveAccount(user);
 }
 
@@ -47,10 +47,7 @@ export function canTransitionAccount(from: AccountStatus, to: AccountStatus): bo
   return ACCOUNT_STATUS_TRANSITIONS[from].includes(to);
 }
 
-export type RestrictedLoginState =
-  | 'PENDING_APPROVAL'
-  | 'APPROVED_PENDING_ACTIVATION'
-  | 'REJECTED';
+export type RestrictedLoginState = 'PENDING_APPROVAL' | 'APPROVED_PENDING_ACTIVATION' | 'REJECTED';
 
 /**
  * Determines whether a password-authenticated account may receive a normal
@@ -66,10 +63,7 @@ export function loginStateFor(
   }
   const accountStatus = accountStatusOf(user);
   if (accountStatus === 'ACTIVE') return { kind: 'ACTIVE' };
-  if (
-    accountStatus === 'PENDING_APPROVAL' ||
-    accountStatus === 'APPROVED_PENDING_ACTIVATION'
-  ) {
+  if (accountStatus === 'PENDING_APPROVAL' || accountStatus === 'APPROVED_PENDING_ACTIVATION') {
     if (registrationStatus === 'APPROVED') {
       return { kind: 'RESTRICTED', status: 'APPROVED_PENDING_ACTIVATION' };
     }

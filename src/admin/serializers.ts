@@ -31,7 +31,9 @@ export function adminRegistrationSummary(review: ReviewWithUser) {
     status: review.status,
     submittedAt: review.submittedAt.toISOString(),
     reviewedAt: review.reviewedAt?.toISOString() ?? null,
-    reviewedBy: review.reviewedBy ? { id: review.reviewedBy.id, name: review.reviewedBy.name } : null,
+    reviewedBy: review.reviewedBy
+      ? { id: review.reviewedBy.id, name: review.reviewedBy.name }
+      : null,
     publicReason: review.publicReason,
     version: review.version,
   };

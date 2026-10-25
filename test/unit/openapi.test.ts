@@ -1,0 +1,32 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parse } from 'yaml';
+import { describe, expect, it } from 'vitest';
+
+describe('OpenAPI contract', () => {
+  const document = parse(readFileSync(resolve(process.cwd(), 'openapi.yaml'), 'utf8')) as {
+    openapi: string;
+    paths: Record<string, unknown>;
+    components: { securitySchemes: Record<string, unknown>; schemas: Record<string, unknown> };
+  };
+
+  it('is a valid OpenAPI 3.1 document with the critical paths', () => {
+    expect(document.openapi).toBe('3.1.0');
+    for (const path of [
+      '/auth/login',
+      '/clubs/{clubId}/sessions',
+      '/sessions/{sessionId}/rotations/preview',
+      '/sessions/{sessionId}/rotations/commit',
+      '/matches/{matchId}/score-events',
+      '/matches/{matchId}/complete',
+      '/public/sessions/{publicId}',
+    ]) {
+      expect(document.paths[path], `missing ${path}`).toBeTruthy();
+    }
+  });
+
+  it('documents session cookies and CSRF', () => {
+    expect(document.components.securitySchemes.sessionCookie).toBeTruthy();
+    expect(document.components.securitySchemes.csrfToken).toBeTruthy();
+  });
+});

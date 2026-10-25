@@ -1,0 +1,514 @@
+// Prisma 6.19 MongoDB schema.
+// Status values are strings because the MongoDB connector does not enforce
+// Prisma enums. Shared Zod contracts are the runtime validation layer.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  email           String   @unique
+  passwordHash    String
+  name            String
+  emailVerifiedAt DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  profile               PlayerProfile?
+  authSessions          AuthSession[]
+  emailTokens           EmailToken[]
+  memberships           ClubMembership[]
+  ownedClubs            Club[]              @relation("ClubOwner")
+  createdInvitations    ClubInvitation[]    @relation("InvitationCreator")
+  acceptedInvitations   ClubInvitation[]    @relation("InvitationAccepted")
+  createdSessions       PlaySession[]       @relation("SessionCreator")
+  sessionRegistrations  SessionRegistration[]
+  queueEntries          QueueEntry[]
+  skillRatings          SkillRating[]
+  matchParticipants     MatchParticipant[]
+  scoreEvents           ScoreEvent[]
+  auditEvents           AuditEvent[]        @relation("AuditActor")
+  notifications         Notification[]
+
+  @@index([emailVerifiedAt])
+}
+
+model PlayerProfile {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @unique @db.ObjectId
+  displayName  String
+  skillRating  Float    @default(3.0)
+  bio          String?
+  avatarColor  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([displayName])
+}
+
+model AuthSession {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  csrfToken  String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime  @default(now())
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+}
+
+model EmailToken {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String    @db.ObjectId
+  type      String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, type, createdAt])
+  @@index([expiresAt])
+}
+
+model Club {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  slug        String    @unique
+  name        String
+  description String?
+  location    String?
+  joinPolicy  String    @default("APPROVAL")
+  ownerId     String    @db.ObjectId
+  version     Int       @default(1)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  owner       User             @relation("ClubOwner", fields: [ownerId], references: [id])
+  memberships ClubMembership[]
+  invitations ClubInvitation[]
+  courts      Court[]
+  playSessions PlaySession[]
+  assignments CourtAssignment[]
+  matches      Match[]
+  auditEvents AuditEvent[]
+
+  @@index([archivedAt])
+  @@index([name])
+}
+
+model ClubMembership {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  clubId     String    @db.ObjectId
+  userId     String    @db.ObjectId
+  role       String
+  status     String
+  joinedAt   DateTime?
+  invitedById String?  @db.ObjectId
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  club Club @relation(fields: [clubId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([clubId, userId])
+  @@index([userId, status])
+  @@index([clubId, status, role])
+}
+
+model ClubInvitation {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  clubId       String    @db.ObjectId
+  email        String
+  role         String
+  tokenHash    String    @unique
+  status       String
+  expiresAt    DateTime
+  invitedById  String    @db.ObjectId
+  acceptedById String?   @db.ObjectId
+  acceptedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  club       Club @relation(fields: [clubId], references: [id])
+  invitedBy  User @relation("InvitationCreator", fields: [invitedById], references: [id])
+  acceptedBy User? @relation("InvitationAccepted", fields: [acceptedById], references: [id])
+
+  @@index([clubId, status, createdAt])
+  @@index([email, status])
+  @@index([expiresAt])
+}
+
+model Court {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  clubId    String   @db.ObjectId
+  name      String
+  status    String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  club          Club             @relation(fields: [clubId], references: [id])
+  sessionCourts SessionCourt[]
+  assignments   CourtAssignment[]
+  matches       Match[]
+
+  @@unique([clubId, name])
+  @@index([clubId, status, sortOrder])
+}
+
+model PlaySession {
+  id                 String    @id @default(auto()) @map("_id") @db.ObjectId
+  clubId             String    @db.ObjectId
+  publicId           String    @unique
+  checkInToken       String    @unique
+  name               String
+  description        String?
+  venue              String?
+  startsAt           DateTime
+  endsAt             DateTime
+  timezone           String
+  status             String
+  capacity           Int
+  format             String
+  registrationPolicy String
+  checkInPolicy      String
+  published          Boolean   @default(false)
+  allowLateArrivals  Boolean   @default(true)
+  matchmakingConfig  Json
+  scoringConfig      Json
+  version            Int       @default(1)
+  createdById        String    @db.ObjectId
+  checkInOpensAt     DateTime?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  cancelReason       String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  club         Club @relation(fields: [clubId], references: [id])
+  createdBy    User @relation("SessionCreator", fields: [createdById], references: [id])
+  sessionCourts SessionCourt[]
+  registrations SessionRegistration[]
+  queueEntries QueueEntry[]
+  rotations    RotationRun[]
+  assignments  CourtAssignment[]
+  matches      Match[]
+  auditEvents  AuditEvent[]
+
+  @@index([clubId, status, startsAt])
+  @@index([clubId, startsAt])
+  @@index([status, startsAt])
+  @@index([published, startsAt])
+}
+
+model SessionCourt {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId String   @db.ObjectId
+  courtId   String   @db.ObjectId
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  session PlaySession @relation(fields: [sessionId], references: [id])
+  court   Court       @relation(fields: [courtId], references: [id])
+
+  @@unique([sessionId, courtId])
+  @@index([sessionId, active])
+}
+
+model SessionRegistration {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId      String    @db.ObjectId
+  userId         String    @db.ObjectId
+  status         String
+  registeredAt   DateTime  @default(now())
+  respondedAt    DateTime?
+  approvedById   String?   @db.ObjectId
+  checkedInAt    DateTime?
+  checkInMethod  String?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  session PlaySession @relation(fields: [sessionId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+
+  @@unique([sessionId, userId])
+  @@index([sessionId, status, registeredAt])
+  @@index([userId, status])
+}
+
+model QueueEntry {
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId        String    @db.ObjectId
+  userId           String    @db.ObjectId
+  state            String
+  position         Int?
+  waitingSince     DateTime
+  accumulatedWaitMs Int      @default(0)
+  gamesPlayed      Int       @default(0)
+  wins             Int       @default(0)
+  losses           Int       @default(0)
+  lastPlayedAt     DateTime?
+  restUntil        DateTime?
+  currentMatchId   String?   @db.ObjectId
+  pausedAt         DateTime?
+  joinedAt         DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  version          Int       @default(1)
+
+  session PlaySession @relation(fields: [sessionId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+
+  @@unique([sessionId, userId])
+  @@index([sessionId, state, gamesPlayed, waitingSince])
+  @@index([currentMatchId])
+  @@index([sessionId, state, waitingSince])
+}
+
+model RotationRun {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId      String    @db.ObjectId
+  status         String
+  strategy       String
+  format         String
+  configSnapshot Json
+  metrics        Json
+  warnings       Json
+  bench          Json
+  inputHash      String
+  sessionVersion Int
+  version        Int       @default(1)
+  expiresAt      DateTime
+  createdById    String    @db.ObjectId
+  committedAt    DateTime?
+  supersededAt   DateTime?
+  createdAt      DateTime  @default(now())
+
+  session     PlaySession      @relation(fields: [sessionId], references: [id])
+  assignments CourtAssignment[]
+
+  @@index([sessionId, status, createdAt])
+  @@index([expiresAt])
+}
+
+model CourtAssignment {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  rotationId   String   @db.ObjectId
+  sessionId    String   @db.ObjectId
+  clubId       String   @db.ObjectId
+  courtId      String   @db.ObjectId
+  matchId      String?  @db.ObjectId
+  status       String
+  teamA        Json
+  teamB        Json
+  teamRatingA  Float
+  teamRatingB  Float
+  teamBalance  Float
+  skillSpread  Float
+  reasons      Json
+  warnings     Json
+  cost         Float
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rotation RotationRun @relation(fields: [rotationId], references: [id])
+  session  PlaySession @relation(fields: [sessionId], references: [id])
+  club     Club        @relation(fields: [clubId], references: [id])
+  court    Court       @relation(fields: [courtId], references: [id])
+  match    Match?      @relation(fields: [matchId], references: [id])
+
+  @@index([sessionId, status])
+  @@index([courtId, status])
+  @@index([rotationId])
+  @@index([matchId])
+}
+
+model Match {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId         String    @db.ObjectId
+  clubId            String    @db.ObjectId
+  courtId           String    @db.ObjectId
+  rotationId        String?   @db.ObjectId
+  assignmentId      String?   @db.ObjectId
+  publicId          String    @unique
+  round             Int
+  format            String
+  status            String
+  scoringMode       String
+  targetScore       Int
+  winByTwo          Boolean
+  pointCap          Int?
+  bestOf            Int
+  games             Json
+  gamesWonA         Int       @default(0)
+  gamesWonB         Int       @default(0)
+  winnerTeam        String?
+  servingTeam       String?
+  teamAScore        Int       @default(0)
+  teamBScore        Int       @default(0)
+  awaitingCompletion Boolean  @default(false)
+  version           Int       @default(1)
+  scorekeeperId     String?   @db.ObjectId
+  configSnapshot    Json
+  startedAt         DateTime?
+  completedAt       DateTime?
+  correctedAt       DateTime?
+  correctionReason  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  session         PlaySession       @relation(fields: [sessionId], references: [id])
+  club            Club              @relation(fields: [clubId], references: [id])
+  court           Court             @relation(fields: [courtId], references: [id])
+  participants    MatchParticipant[]
+  scoreEvents     ScoreEvent[]
+  result          MatchResult?
+  courtAssignments CourtAssignment[]
+
+  @@index([sessionId, status, round])
+  @@index([clubId, status])
+  @@index([courtId, status])
+  @@index([sessionId, completedAt])
+}
+
+model MatchParticipant {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  matchId      String   @db.ObjectId
+  userId       String   @db.ObjectId
+  team         String
+  position     Int
+  displayName  String
+  skillRating  Float
+  createdAt    DateTime @default(now())
+
+  match Match @relation(fields: [matchId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@unique([matchId, userId])
+  @@index([userId, createdAt])
+}
+
+model ScoreEvent {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  matchId     String   @db.ObjectId
+  sequence    Int
+  type        String
+  team        String?
+  points      Int      @default(0)
+  scoreAfter  Json
+  actorId     String   @db.ObjectId
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  match Match @relation(fields: [matchId], references: [id])
+  actor User  @relation(fields: [actorId], references: [id])
+
+  @@unique([matchId, sequence])
+  @@index([matchId, createdAt])
+}
+
+model MatchResult {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  matchId          String   @unique @db.ObjectId
+  sessionId        String   @db.ObjectId
+  winnerTeam       String
+  gamesWonA        Int
+  gamesWonB        Int
+  games            Json
+  completedAt      DateTime
+  recordedById     String   @db.ObjectId
+  correctedAt      DateTime?
+  correctionReason String?
+
+  match Match @relation(fields: [matchId], references: [id])
+
+  @@index([sessionId, completedAt])
+}
+
+model SkillRating {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @db.ObjectId
+  clubId       String?  @db.ObjectId
+  value        Float
+  source       String
+  verifiedById String?  @db.ObjectId
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([clubId, createdAt])
+}
+
+model Notification {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String    @db.ObjectId
+  clubId    String?   @db.ObjectId
+  sessionId String?   @db.ObjectId
+  type      String
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, readAt, createdAt])
+}
+
+model AuditEvent {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  clubId     String?  @db.ObjectId
+  sessionId  String?  @db.ObjectId
+  actorId    String?  @db.ObjectId
+  action     String
+  entityType String
+  entityId   String?
+  summary    String
+  metadata   Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  club    Club?        @relation(fields: [clubId], references: [id])
+  session PlaySession? @relation(fields: [sessionId], references: [id])
+  actor   User?        @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([clubId, createdAt])
+  @@index([sessionId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model IdempotencyRecord {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  key          String
+  userId       String   @db.ObjectId
+  endpoint     String
+  requestHash  String
+  status       String
+  statusCode   Int?
+  response     Json?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@unique([key, userId])
+  @@index([expiresAt])
+}

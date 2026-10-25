@@ -1,0 +1,1231 @@
+openapi: 3.1.0
+info:
+  title: PickleQueue API
+  version: 1.0.0
+  description: |
+    PickleQueue is a pickleball club management and automated queuing API.
+
+    **Authentication** uses an HTTP-only session cookie set by `/auth/login` or
+    `/auth/register`. Authenticated mutations also require the `X-CSRF-Token`
+    header returned by `/auth/me`, `/auth/login` and `/auth/register`.
+
+    **Concurrency** is protected by optimistic versions on sessions, matches,
+    rotation runs and queue entries. Critical mutations accept an
+    `Idempotency-Key` header. A stale version returns `409` with an error code of
+    `CONFLICT`; clients must refresh an authoritative snapshot rather than retry
+    with stale data.
+
+    **Public** endpoints require no session and expose only published sessions
+    with reduced display names.
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development
+tags:
+  - name: Auth
+  - name: Users
+  - name: Clubs
+  - name: Sessions
+  - name: Check-in & Queue
+  - name: Matchmaking
+  - name: Matches & Scoring
+  - name: Public
+  - name: Health
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 80 }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        '201':
+          description: Account created and session cookie set
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/AuthResponse'
+                      - type: object
+                        properties:
+                          devVerificationToken:
+                            type: [string, 'null']
+                            description: Present only when EXPOSE_DEV_TOKENS=true.
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Session cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session
+      responses:
+        '200': { description: Logged out }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current account, memberships and CSRF token
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify an email token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Verified }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Generate a new email verification token
+      responses:
+        '200': { description: Token generated }
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset token (always returns sent)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200': { description: Reset token generated if the account exists }
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset a password and revoke all sessions
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: Password changed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /users/me/profile:
+    get:
+      tags: [Users]
+      summary: Get my profile
+      responses:
+        '200': { description: Profile }
+    patch:
+      tags: [Users]
+      summary: Update my profile and skill rating
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                displayName: { type: string, maxLength: 50 }
+                skillRating: { type: number, minimum: 1, maximum: 7 }
+                bio: { type: [string, 'null'], maxLength: 300 }
+      responses:
+        '200': { description: Updated profile }
+  /users/me/stats:
+    get:
+      tags: [Users]
+      summary: Player statistics
+      responses:
+        '200':
+          description: Stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/PlayerStats' }
+  /users/me/upcoming:
+    get:
+      tags: [Users]
+      summary: My upcoming and live registrations
+      responses:
+        '200': { description: Upcoming sessions }
+  /users/me/matches:
+    get:
+      tags: [Users]
+      summary: Completed match history
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: Match history page }
+  /users/me/notifications:
+    get:
+      tags: [Users]
+      summary: Notifications
+      responses:
+        '200': { description: Notifications }
+
+  /clubs:
+    get:
+      tags: [Clubs]
+      summary: Discover clubs
+      security: []
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: Public club summaries }
+    post:
+      tags: [Clubs]
+      summary: Create a club (creator becomes owner)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 80 }
+                description: { type: string, maxLength: 600 }
+                location: { type: string, maxLength: 120 }
+                joinPolicy:
+                  type: string
+                  enum: [OPEN, APPROVAL, INVITE_ONLY]
+      responses:
+        '201': { description: Club created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /clubs/{clubId}:
+    get:
+      tags: [Clubs]
+      summary: Club summary (public fields; viewer role when a member)
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Club }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Clubs]
+      summary: Update club details
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                name: { type: string }
+                description: { type: [string, 'null'] }
+                location: { type: [string, 'null'] }
+                joinPolicy: { type: string, enum: [OPEN, APPROVAL, INVITE_ONLY] }
+                expectedVersion: { type: integer, minimum: 1 }
+      responses:
+        '200': { description: Club updated }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /clubs/{clubId}/members:
+    get:
+      tags: [Clubs]
+      summary: List members (emails visible to club admins)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Members }
+  /clubs/{clubId}/members/{membershipId}:
+    patch:
+      tags: [Clubs]
+      summary: Change a member role or status (owner only)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+        - name: membershipId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Membership updated }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [Clubs]
+      summary: Remove a member (owner only)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+        - name: membershipId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Member removed }
+  /clubs/{clubId}/join:
+    post:
+      tags: [Clubs]
+      summary: Join or request membership
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '201': { description: Active membership or pending request }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /clubs/{clubId}/leave:
+    post:
+      tags: [Clubs]
+      summary: Leave a club (owner must transfer first)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Left }
+  /clubs/{clubId}/transfer:
+    post:
+      tags: [Clubs]
+      summary: Transfer ownership to an active member (owner only)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string }
+      responses:
+        '200': { description: Ownership transferred }
+  /clubs/{clubId}/archive:
+    post:
+      tags: [Clubs]
+      summary: Archive a club and cancel its upcoming sessions (owner only)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Archived }
+        '409': { description: Live sessions must be finished first }
+  /clubs/{clubId}/invitations:
+    get:
+      tags: [Clubs]
+      summary: List invitations (club admins)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Invitations }
+    post:
+      tags: [Clubs]
+      summary: Invite a player or Queue Master
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [PLAYER, QUEUE_MASTER] }
+      responses:
+        '201':
+          description: Invitation created; development token when enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      invitation: { $ref: '#/components/schemas/Invitation' }
+                      devInvitationToken: { type: [string, 'null'] }
+  /clubs/invitations/accept:
+    post:
+      tags: [Clubs]
+      summary: Accept an invitation matching the signed-in email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Membership activated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /clubs/{clubId}/courts:
+    get:
+      tags: [Clubs]
+      summary: List club courts
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      responses:
+        '200': { description: Courts }
+    post:
+      tags: [Clubs]
+      summary: Create a court (club admin)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                sortOrder: { type: integer, minimum: 0, maximum: 100 }
+      responses:
+        '201': { description: Court created }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /clubs/{clubId}/courts/{courtId}:
+    patch:
+      tags: [Clubs]
+      summary: Update a court
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+        - name: courtId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Court updated }
+    delete:
+      tags: [Clubs]
+      summary: Deactivate a court (historical references preserved)
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+        - name: courtId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Court deactivated }
+
+  /clubs/{clubId}/sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions for a club
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: Sessions }
+    post:
+      tags: [Sessions]
+      summary: Create a draft (or schedule and publish) session
+      parameters:
+        - $ref: '#/components/parameters/ClubId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, startsAt, endsAt, timezone, capacity, courtIds]
+              properties:
+                name: { type: string, maxLength: 100 }
+                description: { type: string, maxLength: 1000 }
+                venue: { type: string, maxLength: 150 }
+                startsAt: { type: string, format: date-time }
+                endsAt: { type: string, format: date-time }
+                timezone: { type: string, example: America/Chicago }
+                capacity: { type: integer, minimum: 2, maximum: 200 }
+                format: { type: string, enum: [SINGLES, DOUBLES] }
+                registrationPolicy: { type: string, enum: [OPEN, APPROVAL, INVITE_ONLY] }
+                checkInPolicy: { type: string, enum: [SELF, MANAGER, SELF_AND_MANAGER] }
+                published: { type: boolean }
+                allowLateArrivals: { type: boolean }
+                courtIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                matchmaking:
+                  $ref: '#/components/schemas/MatchmakingConfig'
+                scoring:
+                  $ref: '#/components/schemas/ScoringConfig'
+      responses:
+        '201': { description: Session }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /sessions/{sessionId}:
+    get:
+      tags: [Sessions]
+      summary: Session detail with viewer registration and counts
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Session detail }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      tags: [Sessions]
+      summary: Update a session before it starts
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Updated session }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /sessions/{sessionId}/status:
+    post:
+      tags: [Sessions]
+      summary: Transition session status
+      description: |
+        Allowed transitions: DRAFT→SCHEDULED, SCHEDULED→CHECK_IN_OPEN,
+        CHECK_IN_OPEN→LIVE, LIVE→COMPLETED, and any non-terminal→CANCELLED.
+        Going live requires the minimum number of checked-in players (4 doubles, 2 singles).
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [DRAFT, SCHEDULED, CHECK_IN_OPEN, LIVE, COMPLETED, CANCELLED]
+                reason: { type: string, maxLength: 300 }
+                force: { type: boolean, default: false }
+                expectedVersion: { type: integer, minimum: 1 }
+      responses:
+        '200': { description: Session after transition }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /sessions/{sessionId}/publish:
+    post:
+      tags: [Sessions]
+      summary: Enable or disable the public link
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [published]
+              properties:
+                published: { type: boolean }
+      responses:
+        '200': { description: Publication changed }
+  /sessions/{sessionId}/public-link:
+    get:
+      tags: [Sessions]
+      summary: Get public and QR check-in links (club admins)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Links }
+  /sessions/{sessionId}/register:
+    post:
+      tags: [Check-in & Queue]
+      summary: Register for a session
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '201': { description: Registered or pending approval }
+        '409': { description: Full, duplicate or registration closed }
+    delete:
+      tags: [Check-in & Queue]
+      summary: Withdraw my registration
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Withdrawn }
+  /sessions/{sessionId}/registrations:
+    get:
+      tags: [Check-in & Queue]
+      summary: Registration board (club admins)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Registrations, counts and capacity }
+  /sessions/{sessionId}/registrations/{registrationId}:
+    patch:
+      tags: [Check-in & Queue]
+      summary: Approve, reject or mark a registration as a no-show
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: registrationId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [APPROVE, REJECT, NO_SHOW] }
+                reason: { type: string, maxLength: 300 }
+      responses:
+        '200': { description: Updated registration }
+  /sessions/{sessionId}/checkins:
+    post:
+      tags: [Check-in & Queue]
+      summary: Check in myself or a player (Queue Master)
+      description: Registration and attendance are separate. Duplicate check-in is idempotent.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, description: Queue Master only }
+                method: { type: string, enum: [SELF, MANAGER, QR] }
+                reason: { type: string }
+      responses:
+        '200': { description: Checked in }
+        '403': { description: Policy requires a Queue Master }
+        '409': { description: Not approved, session full or check-in closed }
+  /sessions/{sessionId}/queue:
+    get:
+      tags: [Check-in & Queue]
+      summary: Queue snapshot with positions and estimated waits
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Queue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/QueueSnapshot' }
+  /sessions/{sessionId}/queue/pause:
+    post:
+      tags: [Check-in & Queue]
+      summary: Pause queue participation (or another player as a Queue Master)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                reason: { type: string }
+      responses:
+        '200': { description: Paused }
+  /sessions/{sessionId}/queue/resume:
+    post:
+      tags: [Check-in & Queue]
+      summary: Resume queue participation with prior wait preserved
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Resumed }
+  /sessions/{sessionId}/leave:
+    post:
+      tags: [Check-in & Queue]
+      summary: Leave the session (not while playing)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Left }
+        '409': { description: Active match }
+  /sessions/{sessionId}/live:
+    get:
+      tags: [Sessions]
+      summary: Composite live snapshot (session, queue, courts, matches, preview)
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Live snapshot with session version }
+  /sessions/{sessionId}/rotations/preview:
+    post:
+      tags: [Matchmaking]
+      summary: Generate a rotation preview
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                maxAssignments: { type: integer, minimum: 1, maximum: 20 }
+      responses:
+        '201':
+          description: Preview with assignments, reasons, metrics and expiry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Rotation' }
+        '409': { description: Session is not live or all courts are occupied }
+  /sessions/{sessionId}/rotations/commit:
+    post:
+      tags: [Matchmaking]
+      summary: Atomically commit a preview
+      description: |
+        The server revalidates every player, registration, rest state, court and
+        session version inside one transaction. A stale or expired preview is
+        rejected. Committing the same rotation again returns its existing matches.
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rotationId, expectedSessionVersion]
+              properties:
+                rotationId: { type: string }
+                expectedSessionVersion: { type: integer, minimum: 1 }
+      responses:
+        '201': { description: Matches created }
+        '200': { description: Rotation already committed; existing matches returned }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /sessions/{sessionId}/rotations/latest:
+    get:
+      tags: [Matchmaking]
+      summary: Latest preview, with a stale flag
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200': { description: Rotation or null }
+  /sessions/{sessionId}/rotations/{rotationId}/cancel:
+    post:
+      tags: [Matchmaking]
+      summary: Cancel a pending preview
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: rotationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Cancelled }
+
+  /matches/{matchId}:
+    get:
+      tags: [Matches & Scoring]
+      summary: Match detail with version and score state
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+      responses:
+        '200':
+          description: Match
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Match' }
+  /matches/{matchId}/start:
+    post:
+      tags: [Matches & Scoring]
+      summary: Start a ready match
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+      responses:
+        '200': { description: Match started or already started }
+  /matches/{matchId}/score-events:
+    post:
+      tags: [Matches & Scoring]
+      summary: Award one rally point
+      description: |
+        `expectedVersion` must equal the current match version. `Idempotency-Key`
+        prevents a network retry from awarding twice.
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [team, expectedVersion]
+              properties:
+                team: { type: string, enum: [A, B] }
+                expectedVersion: { type: integer, minimum: 1 }
+      responses:
+        '201':
+          description: Point recorded, with awaitingCompletion when the match is decided
+        '409': { description: Stale version, match not in progress or already awaiting completion }
+  /matches/{matchId}/undo:
+    post:
+      tags: [Matches & Scoring]
+      summary: Undo the last rally point (in-progress matches only)
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer }
+      responses:
+        '200': { description: Score rebuilt from active point events }
+  /matches/{matchId}/complete:
+    post:
+      tags: [Matches & Scoring]
+      summary: Complete a match that has reached a winning condition
+      description: |
+        Idempotent. Updates the result, player game/win counters, rest state,
+        releases the court and returns players to the queue in one transaction.
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer }
+      responses:
+        '201': { description: Match completed }
+        '200': { description: Already completed }
+        '409': { description: No winning condition or stale version }
+  /matches/{matchId}/correction:
+    post:
+      tags: [Matches & Scoring]
+      summary: Correct a completed match result (authorized Queue Master)
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [games, reason]
+              properties:
+                games:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      a: { type: integer }
+                      b: { type: integer }
+                reason: { type: string, minLength: 3, maxLength: 300 }
+      responses:
+        '200': { description: Corrected and audited }
+        '422': { description: Invalid game sequence }
+  /matches/{matchId}/events:
+    get:
+      tags: [Matches & Scoring]
+      summary: Append-only score event history (club admins)
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+      responses:
+        '200': { description: Score events }
+
+  /checkins/qr:
+    post:
+      tags: [Check-in & Queue]
+      summary: Check in using a session QR token as the authenticated player
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Checked in }
+        '401': { description: Authentication required; the token is not identity }
+
+  /public/sessions/{publicId}:
+    get:
+      tags: [Public]
+      summary: Published session overview, live courts and results
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/PublicId'
+      responses:
+        '200': { description: Public session projection }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /public/sessions/{publicId}/matches:
+    get:
+      tags: [Public]
+      summary: Public live and upcoming matches
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/PublicId'
+      responses:
+        '200': { description: Matches }
+  /public/sessions/{publicId}/results:
+    get:
+      tags: [Public]
+      summary: Public completed results
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/PublicId'
+      responses:
+        '200': { description: Results }
+  /public/clubs/{slug}:
+    get:
+      tags: [Public]
+      summary: Public club profile and published sessions
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Public club }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pq_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  parameters:
+    ClubId:
+      name: clubId
+      in: path
+      required: true
+      schema: { type: string }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string }
+    MatchId:
+      name: matchId
+      in: path
+      required: true
+      schema: { type: string }
+    PublicId:
+      name: publicId
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, minLength: 8, maxLength: 100 }
+  schemas:
+    AuthResponse:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/Me' }
+        csrfToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+    Me:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        emailVerified: { type: boolean }
+        profile:
+          type: object
+          nullable: true
+          properties:
+            displayName: { type: string }
+            skillRating: { type: number }
+            bio: { type: [string, 'null'] }
+        memberships:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+        csrfToken: { type: string }
+    Membership:
+      type: object
+      properties:
+        clubId: { type: string }
+        clubName: { type: string }
+        clubSlug: { type: string }
+        role: { type: string, enum: [OWNER, QUEUE_MASTER, PLAYER] }
+        status: { type: string }
+    Invitation:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        role: { type: string }
+        status: { type: string }
+        expiresAt: { type: string, format: date-time }
+    MatchmakingConfig:
+      type: object
+      properties:
+        strategy: { type: string, enum: [HYBRID, SKILL_FIRST, FAIRNESS_FIRST] }
+        format: { type: string, enum: [SINGLES, DOUBLES] }
+        preferredSkillSpread: { type: number, minimum: 0, maximum: 3 }
+        maxSkillSpread: { type: number, minimum: 0.25, maximum: 4 }
+        widenAfterMinutes: { type: integer }
+        minRestMinutes: { type: integer }
+        partnerPenalty: { type: number }
+        opponentPenalty: { type: number }
+        starvationMaxGap: { type: integer }
+        maxGamesPerPlayer: { type: [integer, 'null'] }
+        autoAssign: { type: boolean }
+        allowMixedSkillFallback: { type: boolean }
+    ScoringConfig:
+      type: object
+      properties:
+        mode: { type: string, enum: [RALLY] }
+        targetScore: { type: integer, enum: [11, 15, 21] }
+        winByTwo: { type: boolean }
+        pointCap: { type: [integer, 'null'] }
+        bestOf: { type: integer, enum: [1, 3] }
+    QueueSnapshot:
+      type: object
+      properties:
+        sessionId: { type: string }
+        version: { type: integer }
+        counts:
+          type: object
+          properties:
+            checkedIn: { type: integer }
+            waiting: { type: integer }
+            playing: { type: integer }
+            paused: { type: integer }
+            pending: { type: integer }
+        queue:
+          type: array
+          items:
+            type: object
+            properties:
+              userId: { type: string }
+              displayName: { type: string }
+              skillRating: { type: number }
+              state: { type: string }
+              gamesPlayed: { type: integer }
+              waitingMinutes: { type: integer }
+              position: { type: [integer, 'null'] }
+              estimatedWaitMinutes: { type: [integer, 'null'] }
+        self:
+          type: [object, 'null']
+    Rotation:
+      type: object
+      properties:
+        rotationId: { type: string }
+        sessionVersion: { type: integer }
+        stale: { type: boolean }
+        expiresAt: { type: string, format: date-time }
+        assignments:
+          type: array
+          items:
+            type: object
+            properties:
+              courtName: { type: string }
+              teamA: { type: array, items: { $ref: '#/components/schemas/SelectedPlayer' } }
+              teamB: { type: array, items: { $ref: '#/components/schemas/SelectedPlayer' } }
+              teamRatingA: { type: number }
+              teamRatingB: { type: number }
+              teamBalance: { type: number }
+              skillSpread: { type: number }
+              reasons: { type: array, items: { type: string } }
+              warnings: { type: array, items: { type: string } }
+        bench:
+          type: array
+          items:
+            type: object
+            properties:
+              displayName: { type: string }
+              reason: { type: string }
+    SelectedPlayer:
+      type: object
+      properties:
+        userId: { type: string }
+        displayName: { type: string }
+        skill: { type: number }
+        gamesPlayed: { type: integer }
+        waitMinutes: { type: number }
+    Match:
+      type: object
+      properties:
+        id: { type: string }
+        publicId: { type: string }
+        status:
+          {
+            type: string,
+            enum: [PROPOSED, RESERVED, READY, IN_PROGRESS, COMPLETED, CANCELLED, CORRECTED],
+          }
+        court:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        version: { type: integer }
+        currentGame:
+          type: object
+          properties:
+            a: { type: integer }
+            b: { type: integer }
+        gamesWonA: { type: integer }
+        gamesWonB: { type: integer }
+        winnerTeam: { type: [string, 'null'], enum: [A, B, null] }
+        servingTeam: { type: [string, 'null'], enum: [A, B, null] }
+        awaitingCompletion: { type: boolean }
+        teams:
+          type: object
+          properties:
+            A: { type: array, items: { $ref: '#/components/schemas/MatchPlayer' } }
+            B: { type: array, items: { $ref: '#/components/schemas/MatchPlayer' } }
+    MatchPlayer:
+      type: object
+      properties:
+        userId: { type: string }
+        name: { type: string }
+        displayName: { type: string }
+        skillRating: { type: number }
+    PlayerStats:
+      type: object
+      properties:
+        clubs: { type: integer }
+        sessionsAttended: { type: integer }
+        matchesPlayed: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        winRate: { type: number }
+        unreadNotifications: { type: integer }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  path: { type: string }
+                  message: { type: string }
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Missing club permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Stale version, duplicate or invalid state transition
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Zod request validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+security:
+  - sessionCookie: []
+    csrfToken: []

@@ -1,4 +1,4 @@
-﻿import { Router, type Router as ExpressRouter } from 'express';
+import { Router, type Router as ExpressRouter } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { authenticated, emailVerified, requireAuth } from '../http/middleware/auth.js';
 import { requestMetadata } from '../http/middleware/request-id.js';

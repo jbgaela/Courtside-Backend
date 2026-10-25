@@ -215,6 +215,7 @@ async function loadSnapshot(
           clubId: session.clubId,
           userId: { in: queueEntries.map((entry) => entry.userId) },
           status: 'ACTIVE',
+          user: { accountStatus: 'ACTIVE' },
         },
         select: { userId: true },
       })
@@ -455,6 +456,7 @@ export async function commitRotation(
         clubId: access.session.clubId,
         userId: { in: playerIds },
         status: 'ACTIVE',
+        user: { accountStatus: 'ACTIVE' },
       },
       select: { userId: true },
     });
@@ -717,7 +719,8 @@ export async function overridePreviewPlayer(
     !queueEntry ||
     !['WAITING', 'RESTING'].includes(queueEntry.state) ||
     queueEntry.currentMatchId ||
-    membership?.status !== 'ACTIVE'
+    membership?.status !== 'ACTIVE' ||
+    queueEntry.user.accountStatus !== 'ACTIVE'
   ) {
     throw AppError.conflict('The replacement is no longer eligible to enter the rotation');
   }

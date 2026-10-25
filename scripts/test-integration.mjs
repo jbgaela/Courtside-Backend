@@ -21,13 +21,16 @@ try {
     FRONTEND_ORIGIN: 'http://localhost:3000',
     SOCKET_SESSION_CHECK_INTERVAL_MS: '1000',
     SOCKET_MAX_CONNECTIONS_PER_IP: '100',
+    MFA_ENCRYPTION_KEY: 'N1e6jKiRDEV7XvbMd7pKfuDHwXF45AdS6sgKf4jqV0w=',
+    REQUIRE_SUPER_ADMIN_MFA: 'false',
   };
 
   const pushExit = runCommand('pnpm exec prisma db push --skip-generate', env);
   if (pushExit !== 0) process.exitCode = pushExit;
   else {
+    const only = process.env.PQ_TEST_FILE ? ` ${process.env.PQ_TEST_FILE}` : '';
     process.exitCode = runCommand(
-      'pnpm exec vitest run --config vitest.integration.config.ts',
+      `pnpm exec vitest run --config vitest.integration.config.ts${only}`,
       env,
     );
   }

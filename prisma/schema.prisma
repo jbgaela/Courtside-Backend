@@ -17,26 +17,46 @@ model User {
   passwordHash    String
   name            String
   emailVerifiedAt DateTime?
+  platformRole    String   @default("USER")
+  accountStatus   String   @default("ACTIVE")
+  activatedAt     DateTime?
+  deletedAt       DateTime?
+  termsAcceptedAt DateTime?
+  sessionVersion  Int      @default(0)
+  mfaEnabled      Boolean  @default(false)
+  mfaSecret       String?
+  mfaEnrolledAt   DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  profile               PlayerProfile?
-  authSessions          AuthSession[]
-  emailTokens           EmailToken[]
-  memberships           ClubMembership[]
-  ownedClubs            Club[]              @relation("ClubOwner")
-  createdInvitations    ClubInvitation[]    @relation("InvitationCreator")
-  acceptedInvitations   ClubInvitation[]    @relation("InvitationAccepted")
-  createdSessions       PlaySession[]       @relation("SessionCreator")
-  sessionRegistrations  SessionRegistration[]
-  queueEntries          QueueEntry[]
-  skillRatings          SkillRating[]
-  matchParticipants     MatchParticipant[]
-  scoreEvents           ScoreEvent[]
-  auditEvents           AuditEvent[]        @relation("AuditActor")
-  notifications         Notification[]
+  profile                   PlayerProfile?
+  authSessions              AuthSession[]
+  emailTokens               EmailToken[]
+  registrationReview        RegistrationReview?
+  registrationSessions      RegistrationSession[]
+  mfaChallenges             MfaChallenge[]
+  accountClaimTokens        AccountClaimToken[]
+  accountRecoveryTokens     AccountRecoveryToken[]
+  reviewedRegistrations     RegistrationReview[]      @relation("RegistrationReviewer")
+  memberships               ClubMembership[]
+  ownedClubs                Club[]                    @relation("ClubOwner")
+  createdInvitations        ClubInvitation[]          @relation("InvitationCreator")
+  acceptedInvitations       ClubInvitation[]          @relation("InvitationAccepted")
+  createdSessions           PlaySession[]             @relation("SessionCreator")
+  sessionRegistrations      SessionRegistration[]
+  queueEntries              QueueEntry[]
+  skillRatings              SkillRating[]
+  matchParticipants         MatchParticipant[]
+  scoreEvents               ScoreEvent[]
+  auditEvents               AuditEvent[]              @relation("AuditActor")
+  adminAuditEvents          AdministrativeAuditEvent[] @relation("AdminAuditActor")
+  adminAuditTargets         AdministrativeAuditEvent[] @relation("AdminAuditTarget")
+  notifications             Notification[]
 
   @@index([emailVerifiedAt])
+  @@index([platformRole, accountStatus])
+  @@index([accountStatus, createdAt])
+  @@index([deletedAt])
 }
 
 model PlayerProfile {
@@ -60,9 +80,10 @@ model AuthSession {
   tokenHash  String    @unique
   csrfToken  String
   expiresAt  DateTime
-  revokedAt  DateTime?
-  lastUsedAt DateTime  @default(now())
-  ip         String?
+  revokedAt         DateTime?
+  lastUsedAt        DateTime @default(now())
+  reauthenticatedAt DateTime?
+  ip                String?
   userAgent  String?
   createdAt  DateTime  @default(now())
 
@@ -511,4 +532,108 @@ model IdempotencyRecord {
 
   @@unique([key, userId])
   @@index([expiresAt])
+}
+
+model RegistrationReview {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId         String    @unique @db.ObjectId
+  status         String
+  version        Int       @default(1)
+  submittedAt    DateTime  @default(now())
+  reviewedAt     DateTime?
+  reviewedById   String?   @db.ObjectId
+  internalReason String?
+  publicReason   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user       User  @relation(fields: [userId], references: [id])
+  reviewedBy User? @relation("RegistrationReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, submittedAt])
+  @@index([reviewedById, reviewedAt])
+}
+
+model RegistrationSession {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  tokenHash String   @unique
+  csrfToken String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+}
+
+model MfaChallenge {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  purpose    String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+model AccountClaimToken {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String    @db.ObjectId
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdById String?   @db.ObjectId
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+model AccountRecoveryToken {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @db.ObjectId
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  revokedAt  DateTime?
+  createdById String?  @db.ObjectId
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+model AdministrativeAuditEvent {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  actorId      String?  @db.ObjectId
+  targetUserId String?  @db.ObjectId
+  action       String
+  outcome      String
+  entityType   String?
+  entityId     String?
+  summary      String
+  metadata     Json?
+  requestId    String?
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  actor  User? @relation("AdminAuditActor", fields: [actorId], references: [id])
+  target User? @relation("AdminAuditTarget", fields: [targetUserId], references: [id])
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@index([action, createdAt])
 }

@@ -7,6 +7,7 @@ import { usersRouter } from './users/routes.js';
 import { checkinsRouter, clubSessionsRouter, sessionsRouter } from './sessions/routes.js';
 import { matchesRouter } from './matches/routes.js';
 import { publicRouter } from './public/routes.js';
+import { adminRouter } from './admin/routes.js';
 
 export const apiRouter: ExpressRouter = Router();
 
@@ -42,3 +43,4 @@ apiRouter.use('/matches', matchesRouter);
 apiRouter.use('/checkins', checkinsRouter);
 apiRouter.use('/users', usersRouter);
 apiRouter.use('/public', publicRouter);
+apiRouter.use('/admin', adminRouter);

@@ -8,6 +8,7 @@ import { prisma } from '../../src/infrastructure/prisma.js';
 import { closeRealtime, initRealtime } from '../../src/realtime/gateway.js';
 import { frontendOrigins } from '../../src/config/env.js';
 import { maybeAutoRotate } from '../../src/matchmaking/service.js';
+import { hashPassword } from '../../src/security/password.js';
 
 const allowedOrigin = frontendOrigins[0] ?? 'http://localhost:3000';
 
@@ -16,9 +17,10 @@ let socketUrl: string;
 
 function cookieFrom(response: request.Response): string {
   const header = response.headers['set-cookie'];
-  const first = Array.isArray(header) ? header[0] : header;
-  if (!first) throw new Error('Expected a session cookie');
-  return first.split(';')[0] ?? first;
+  const values = Array.isArray(header) ? header : header ? [header] : [];
+  const session = values.find((value) => value.startsWith('pq_session='));
+  if (!session) throw new Error('Expected a session cookie');
+  return session.split(';')[0] ?? session;
 }
 
 async function directLogin(email: string) {
@@ -158,21 +160,39 @@ describe('authentication and account recovery hardening', () => {
 
   it('invalidates an older verification link when a newer one is issued', async () => {
     const email = `email-token.${Date.now()}@example.test`;
-    const registered = await request(app)
-      .post('/api/v1/auth/register')
-      .send({ name: 'Email Token', email, password: PASSWORD })
-      .expect(201);
-    const firstToken = registered.body.data.devVerificationToken as string;
-    const csrf = registered.body.data.csrfToken as string;
-    const cookie = cookieFrom(registered);
+    const passwordHash = await hashPassword(PASSWORD);
+    await prisma.user.create({
+      data: {
+        name: 'Email Token',
+        email,
+        passwordHash,
+        platformRole: 'USER',
+        accountStatus: 'ACTIVE',
+        activatedAt: new Date(),
+        profile: { create: { displayName: 'Email Token', skillRating: 3 } },
+      },
+    });
+    const login = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email, password: PASSWORD })
+      .expect(200);
+    const csrf = login.body.data.csrfToken as string;
+    const cookie = cookieFrom(login);
 
-    const resent = await request(app)
+    const firstResend = await request(app)
       .post('/api/v1/auth/resend-verification')
       .set('Cookie', cookie)
       .set('x-csrf-token', csrf)
       .send({})
       .expect(200);
-    const secondToken = resent.body.data.devVerificationToken as string;
+    const firstToken = firstResend.body.data.devVerificationToken as string;
+    const secondResend = await request(app)
+      .post('/api/v1/auth/resend-verification')
+      .set('Cookie', cookie)
+      .set('x-csrf-token', csrf)
+      .send({})
+      .expect(200);
+    const secondToken = secondResend.body.data.devVerificationToken as string;
     expect(secondToken).not.toBe(firstToken);
 
     await request(app).post('/api/v1/auth/verify-email').send({ token: firstToken }).expect(400);

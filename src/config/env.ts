@@ -31,6 +31,16 @@ const envSchema = z.object({
   PREVIEW_TTL_SECONDS: z.coerce.number().int().min(30).max(600).default(300),
   SOCKET_SESSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
   SOCKET_MAX_CONNECTIONS_PER_IP: z.coerce.number().int().min(1).max(1_000).default(50),
+  REGISTRATION_TTL_MINUTES: z.coerce.number().int().min(5).max(240).default(30),
+  ADMIN_REAUTH_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
+  RECOVERY_TTL_MINUTES: z.coerce.number().int().min(5).max(240).default(60),
+  CLAIM_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(72),
+  MFA_CHALLENGE_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+  MFA_ENCRYPTION_KEY: z.string().min(24).optional(),
+  REQUIRE_SUPER_ADMIN_MFA: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   SEED_PASSWORD: z.string().min(8).default('PickleQueue123!'),
 });
 
@@ -75,11 +85,19 @@ export function productionSafetyFailures(input: {
   cookieSecure: boolean;
   apiPublicOrigin: string;
   frontendOrigins: string[];
+  requireSuperAdminMfa: boolean;
+  mfaKeyConfigured: boolean;
 }): string[] {
   const failures: string[] = [];
   if (input.exposeDevTokens) failures.push('EXPOSE_DEV_TOKENS must be false in production');
   if (input.rateLimitDisabled) failures.push('RATE_LIMIT_DISABLED must be false in production');
   if (!input.cookieSecure) failures.push('COOKIE_SECURE must be true in production');
+  if (!input.requireSuperAdminMfa) {
+    failures.push('REQUIRE_SUPER_ADMIN_MFA must be true in production');
+  }
+  if (!input.mfaKeyConfigured) {
+    failures.push('MFA_ENCRYPTION_KEY must be configured when Super Admin MFA is required');
+  }
   if (input.apiPublicOrigin.startsWith('http://')) {
     failures.push('API_PUBLIC_URL must use HTTPS in production');
   }
@@ -101,6 +119,8 @@ if (isProduction) {
     cookieSecure: env.COOKIE_SECURE,
     apiPublicOrigin,
     frontendOrigins,
+    requireSuperAdminMfa: env.REQUIRE_SUPER_ADMIN_MFA,
+    mfaKeyConfigured: Boolean(env.MFA_ENCRYPTION_KEY),
   });
   if (failures.length > 0) {
     throw new Error(

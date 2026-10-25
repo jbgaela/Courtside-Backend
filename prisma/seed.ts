@@ -18,6 +18,55 @@ interface DemoPlayer {
   skill: number;
 }
 
+interface DemoRegistration {
+  name: string;
+  email: string;
+  skill: number;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  accountStatus: 'PENDING_APPROVAL' | 'APPROVED_PENDING_ACTIVATION' | 'SUSPENDED';
+  publicReason?: string;
+}
+
+const DEMO_REGISTRATIONS: DemoRegistration[] = [
+  {
+    name: 'Jamie Park',
+    email: 'jamie@picklequeue.dev',
+    skill: 3.0,
+    status: 'PENDING',
+    accountStatus: 'PENDING_APPROVAL',
+  },
+  {
+    name: 'Taylor Kim',
+    email: 'taylor@picklequeue.dev',
+    skill: 3.75,
+    status: 'PENDING',
+    accountStatus: 'PENDING_APPROVAL',
+  },
+  {
+    name: 'Casey Nguyen',
+    email: 'casey@picklequeue.dev',
+    skill: 2.75,
+    status: 'PENDING',
+    accountStatus: 'PENDING_APPROVAL',
+  },
+  {
+    name: 'Riley Brooks',
+    email: 'riley@picklequeue.dev',
+    skill: 3.25,
+    status: 'REJECTED',
+    accountStatus: 'PENDING_APPROVAL',
+    publicReason: 'We could not verify this registration belongs to a local player.',
+  },
+  {
+    name: 'Drew Ellis',
+    email: 'drew@picklequeue.dev',
+    skill: 3.5,
+    status: 'APPROVED',
+    accountStatus: 'SUSPENDED',
+    publicReason: 'Account suspended pending a club review.',
+  },
+];
+
 const PLAYERS: DemoPlayer[] = [
   { key: 'owner', name: 'Morgan Lee', email: 'owner@picklequeue.dev', skill: 3.75 },
   { key: 'alex', name: 'Alex Reyes', email: 'alex@picklequeue.dev', skill: 3.5 },
@@ -78,12 +127,20 @@ async function upsertDemoUsers(): Promise<Map<string, { id: string }>> {
         name: player.name,
         passwordHash: hash,
         emailVerifiedAt: new Date(),
+        platformRole: 'USER',
+        accountStatus: 'ACTIVE',
+        activatedAt: new Date(),
+        deletedAt: null,
       },
       create: {
         email: player.email,
         name: player.name,
         passwordHash: hash,
         emailVerifiedAt: new Date(),
+        platformRole: 'USER',
+        accountStatus: 'ACTIVE',
+        activatedAt: new Date(),
+        termsAcceptedAt: new Date(),
         profile: {
           create: {
             displayName: player.name,
@@ -102,6 +159,97 @@ async function upsertDemoUsers(): Promise<Map<string, { id: string }>> {
   return map;
 }
 
+async function upsertSuperAdminDemo(): Promise<void> {
+  const hash = await bcrypt.hash(PASSWORD, 10);
+  const admin = await prisma.user.upsert({
+    where: { email: 'sarah@picklequeue.dev' },
+    update: {
+      name: 'Sarah Mitchell',
+      passwordHash: hash,
+      platformRole: 'SUPER_ADMIN',
+      accountStatus: 'ACTIVE',
+      emailVerifiedAt: new Date(),
+      activatedAt: new Date(),
+      deletedAt: null,
+      mfaEnabled: false,
+      mfaSecret: null,
+      mfaEnrolledAt: null,
+    },
+    create: {
+      email: 'sarah@picklequeue.dev',
+      name: 'Sarah Mitchell',
+      passwordHash: hash,
+      platformRole: 'SUPER_ADMIN',
+      accountStatus: 'ACTIVE',
+      emailVerifiedAt: new Date(),
+      activatedAt: new Date(),
+      termsAcceptedAt: new Date(),
+      profile: {
+        create: { displayName: 'Sarah Mitchell', skillRating: 3.5 },
+      },
+    },
+  });
+  await prisma.playerProfile.upsert({
+    where: { userId: admin.id },
+    update: { displayName: 'Sarah Mitchell', skillRating: 3.5 },
+    create: { userId: admin.id, displayName: 'Sarah Mitchell', skillRating: 3.5 },
+  });
+}
+
+async function upsertApprovalDemoRegistrations(): Promise<void> {
+  const hash = await bcrypt.hash(PASSWORD, 10);
+  const reviewer = await prisma.user.findUnique({ where: { email: 'sarah@picklequeue.dev' } });
+  for (const [index, applicant] of DEMO_REGISTRATIONS.entries()) {
+    const user = await prisma.user.upsert({
+      where: { email: applicant.email },
+      update: {
+        name: applicant.name,
+        passwordHash: hash,
+        platformRole: 'USER',
+        accountStatus: applicant.accountStatus,
+        activatedAt: applicant.accountStatus === 'SUSPENDED' ? new Date() : null,
+        deletedAt: null,
+      },
+      create: {
+        email: applicant.email,
+        name: applicant.name,
+        passwordHash: hash,
+        platformRole: 'USER',
+        accountStatus: applicant.accountStatus,
+        activatedAt: applicant.accountStatus === 'SUSPENDED' ? new Date() : null,
+        termsAcceptedAt: new Date(),
+        profile: {
+          create: { displayName: applicant.name, skillRating: applicant.skill },
+        },
+      },
+    });
+    await prisma.playerProfile.upsert({
+      where: { userId: user.id },
+      update: { displayName: applicant.name, skillRating: applicant.skill },
+      create: { userId: user.id, displayName: applicant.name, skillRating: applicant.skill },
+    });
+    const submittedAt = new Date(Date.now() - (index + 1) * 26 * 60 * 60 * 1000);
+    await prisma.registrationReview.upsert({
+      where: { userId: user.id },
+      update: {
+        status: applicant.status,
+        submittedAt,
+        reviewedAt: applicant.status === 'PENDING' ? null : submittedAt,
+        reviewedById: applicant.status === 'PENDING' ? null : (reviewer?.id ?? null),
+        publicReason: applicant.publicReason ?? null,
+      },
+      create: {
+        userId: user.id,
+        status: applicant.status,
+        submittedAt,
+        reviewedAt: applicant.status === 'PENDING' ? null : submittedAt,
+        reviewedById: applicant.status === 'PENDING' ? null : (reviewer?.id ?? null),
+        publicReason: applicant.publicReason ?? null,
+      },
+    });
+  }
+}
+
 async function main(): Promise<void> {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   if (!process.env.NODE_ENV) throw new Error('NODE_ENV is required');
@@ -116,6 +264,8 @@ async function main(): Promise<void> {
   console.log('Resetting demo club (only riverside-pickleball is touched)...');
   await cleanupDemoClub();
   const users = await upsertDemoUsers();
+  await upsertSuperAdminDemo();
+  await upsertApprovalDemoRegistrations();
   const id = (key: string): string => {
     const user = users.get(key);
     if (!user) throw new Error(`Missing demo user ${key}`);
@@ -562,6 +712,10 @@ async function main(): Promise<void> {
   console.log('  Queue Master: owner@picklequeue.dev  (Morgan Lee)');
   console.log('  Player:       alex@picklequeue.dev   (Alex Reyes)');
   console.log('  Queue Master: jordan@picklequeue.dev (Jordan Kim)');
+  console.log('  Super Admin:  sarah@picklequeue.dev  (Sarah Mitchell)');
+  console.log(
+    '  Pending:      jamie@picklequeue.dev, taylor@picklequeue.dev, casey@picklequeue.dev',
+  );
 }
 
 main()

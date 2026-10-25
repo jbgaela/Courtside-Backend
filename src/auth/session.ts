@@ -6,6 +6,7 @@ import { logger } from '../infrastructure/logger.js';
 import { randomToken, sha256 } from '../security/tokens.js';
 import { readSessionCookie } from './cookies.js';
 import { revokeSocketSession } from '../realtime/gateway.js';
+import { accountStatusOf } from '../accounts/state.js';
 
 export interface CreatedSession {
   token: string;
@@ -27,6 +28,7 @@ export async function createAuthSession(
       tokenHash: sha256(token),
       csrfToken,
       expiresAt,
+      reauthenticatedAt: new Date(),
       ip: metadata.ip ?? null,
       userAgent: metadata.userAgent?.slice(0, 300) ?? null,
     },
@@ -46,7 +48,11 @@ export async function attachAuth(req: Request): Promise<void> {
 
   if (!record) return;
   const idleMs = env.SESSION_IDLE_DAYS * 24 * 60 * 60 * 1000;
-  if (record.revokedAt || record.expiresAt.getTime() <= Date.now()) {
+  if (
+    record.revokedAt ||
+    record.expiresAt.getTime() <= Date.now() ||
+    accountStatusOf(record.user) !== 'ACTIVE'
+  ) {
     return;
   }
   if (Date.now() - record.lastUsedAt.getTime() > idleMs) {
@@ -63,6 +69,7 @@ export async function attachAuth(req: Request): Promise<void> {
       id: record.id,
       csrfToken: record.csrfToken,
       expiresAt: record.expiresAt,
+      reauthenticatedAt: record.reauthenticatedAt,
     },
   };
 
@@ -80,12 +87,13 @@ export function requireAuth(req: Request): NonNullable<Request['auth']> {
   return req.auth;
 }
 
+/**
+ * Legacy route guard name retained for compatibility. Email ownership is
+ * informational in the approval-first model; the active account and club
+ * authorization checks are the authoritative access gates.
+ */
 export function requireVerifiedEmail(req: Request): NonNullable<Request['auth']> {
-  const auth = requireAuth(req);
-  if (!auth.user.emailVerifiedAt) {
-    throw AppError.forbidden('Verify your email address before performing this action');
-  }
-  return auth;
+  return requireAuth(req);
 }
 
 export async function revokeCurrentSession(req: Request): Promise<void> {

@@ -8,7 +8,7 @@ import { env, frontendOrigins, isTest } from './config/env.js';
 import { logger } from './infrastructure/logger.js';
 import { prisma } from './infrastructure/prisma.js';
 import { requestId } from './http/middleware/request-id.js';
-import { withAuth, csrfGuard } from './http/middleware/auth.js';
+import { withAuth, withRegistrationAuth, withMfaAuth, csrfGuard } from './http/middleware/auth.js';
 import {
   generalRateLimit,
   readinessRateLimit,
@@ -114,6 +114,8 @@ export function createApp(): Express {
     writeRateLimit(req, res, next);
   });
   app.use(withAuth);
+  app.use(withRegistrationAuth);
+  app.use(withMfaAuth);
   app.use(csrfGuard);
   app.use('/api/v1', apiRouter);
 

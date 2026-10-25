@@ -26,8 +26,9 @@ async function activeRegistrationCount(sessionId: string): Promise<number> {
 async function ensureClubMember(sessionClubId: string, userId: string) {
   const membership = await prisma.clubMembership.findUnique({
     where: { clubId_userId: { clubId: sessionClubId, userId } },
+    include: { user: { select: { accountStatus: true } } },
   });
-  if (!membership || membership.status !== 'ACTIVE') {
+  if (!membership || membership.status !== 'ACTIVE' || membership.user.accountStatus !== 'ACTIVE') {
     throw AppError.forbidden('The player must be an active club member');
   }
 }

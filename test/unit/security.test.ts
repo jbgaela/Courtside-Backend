@@ -52,8 +52,10 @@ describe('security utilities', () => {
       cookieSecure: false,
       apiPublicOrigin: 'http://api.example.test',
       frontendOrigins: ['http://app.example.test'],
+      requireSuperAdminMfa: false,
+      mfaKeyConfigured: false,
     });
-    expect(failures).toHaveLength(5);
+    expect(failures).toHaveLength(7);
 
     const safe = productionSafetyFailures({
       exposeDevTokens: false,
@@ -61,6 +63,8 @@ describe('security utilities', () => {
       cookieSecure: true,
       apiPublicOrigin: 'https://api.example.test',
       frontendOrigins: ['https://app.example.test'],
+      requireSuperAdminMfa: true,
+      mfaKeyConfigured: true,
     });
     expect(safe).toEqual([]);
   });

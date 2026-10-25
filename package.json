@@ -27,7 +27,11 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:verify": "tsx scripts/verify-db.ts",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "db:migrate:accounts": "tsx scripts/migrate-account-lifecycle.ts",
+    "admin:bootstrap": "tsx scripts/bootstrap-super-admin.ts",
+    "admin:promote": "tsx scripts/provision-super-admin.ts",
+    "admin:reset-mfa": "tsx scripts/reset-super-admin-mfa.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

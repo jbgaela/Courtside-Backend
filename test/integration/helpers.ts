@@ -1,6 +1,8 @@
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../../src/app.js';
+import { prisma } from '../../src/infrastructure/prisma.js';
+import bcrypt from 'bcryptjs';
 
 export const app = createApp();
 export type Agent = ReturnType<typeof request.agent>;
@@ -21,36 +23,96 @@ function body<T>(response: request.Response): T {
   return (response.body as { data: T }).data;
 }
 
+/**
+ * Test fixture shortcut: registration now intentionally creates a pending
+ * account with no session. Most existing integration tests need an ordinary
+ * active account, so this helper approves that fixture directly in the test
+ * database and then authenticates through the real login endpoint.
+ */
 export async function registerUser(label: string): Promise<TestUser> {
   counter += 1;
   const suffix = `${randomUUID().slice(0, 8)}-${counter}`;
   const email = `pq.${label}.${suffix}@example.test`;
   const name = `${label} ${counter}`;
-  const agent = request.agent(app);
-  const response = await agent
+  const registerAgent = request.agent(app);
+  await registerAgent
     .post('/api/v1/auth/register')
-    .send({ name, email, password: PASSWORD })
+    .send({ name, email, password: PASSWORD, acceptTerms: true })
     .expect(201);
-  const data = body<{
-    user: { id: string; csrfToken: string };
-    csrfToken: string;
-    devVerificationToken: string | null;
-  }>(response);
+  const fixture = await prisma.user.findUniqueOrThrow({ where: { email } });
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: fixture.id },
+      data: {
+        accountStatus: 'ACTIVE',
+        activatedAt: new Date(),
+        emailVerifiedAt: new Date(),
+      },
+    }),
+    prisma.registrationReview.update({
+      where: { userId: fixture.id },
+      data: {
+        status: 'APPROVED',
+        reviewedAt: new Date(),
+        version: { increment: 1 },
+      },
+    }),
+  ]);
+  return loginUser(email);
+}
 
+export interface PendingRegistration {
+  userId: string;
+  registrationId: string;
+  email: string;
+  name: string;
+  version: number;
+  status: string;
+}
+
+export async function registerPendingUser(label: string): Promise<PendingRegistration> {
+  counter += 1;
+  const suffix = `${randomUUID().slice(0, 8)}-${counter}`;
+  const email = `pending.${label}.${suffix}@example.test`;
+  const name = `Pending ${counter}`;
+  const agent = request.agent(app);
   await agent
-    .post('/api/v1/auth/verify-email')
-    .set('x-csrf-token', data.csrfToken)
-    .send({ token: data.devVerificationToken })
-    .expect(200);
-
+    .post('/api/v1/auth/register')
+    .send({ name, email, password: PASSWORD, acceptTerms: true })
+    .expect(201);
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { email },
+    include: { registrationReview: true },
+  });
+  if (!user.registrationReview) throw new Error('Expected registration review');
   return {
-    agent,
-    id: data.user.id,
+    userId: user.id,
+    registrationId: user.registrationReview.id,
     email,
     name,
-    csrf: data.csrfToken,
-    verifyToken: data.devVerificationToken,
+    version: user.registrationReview.version,
+    status: user.registrationReview.status,
   };
+}
+
+export async function createSuperAdminUser(label = 'superadmin'): Promise<TestUser> {
+  counter += 1;
+  const suffix = `${randomUUID().slice(0, 8)}-${counter}`;
+  const email = `admin.${label}.${suffix}@example.test`;
+  const passwordHash = await bcrypt.hash(PASSWORD, 12);
+  await prisma.user.create({
+    data: {
+      email,
+      name: `Admin ${counter}`,
+      passwordHash,
+      platformRole: 'SUPER_ADMIN',
+      accountStatus: 'ACTIVE',
+      activatedAt: new Date(),
+      emailVerifiedAt: new Date(),
+      profile: { create: { displayName: `Admin ${counter}`, skillRating: 3 } },
+    },
+  });
+  return loginUser(email);
 }
 
 export async function loginUser(email: string, password = PASSWORD): Promise<TestUser> {

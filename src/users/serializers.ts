@@ -17,6 +17,9 @@ export function toSelf(user: User, profile: PlayerProfile | null) {
     name: user.name,
     emailVerified: Boolean(user.emailVerifiedAt),
     emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
+    platformRole: user.platformRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'USER',
+    accountStatus: user.accountStatus ?? 'ACTIVE',
+    activatedAt: user.activatedAt?.toISOString() ?? null,
     createdAt: user.createdAt.toISOString(),
     profile: profile
       ? {

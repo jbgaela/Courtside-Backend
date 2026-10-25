@@ -76,12 +76,6 @@ Password: `PickleQueue123!`
 Seed data is development/test only. See `.env.example` and the security
 runbooks before any production deployment.
 
-## CI
-
-`.github/workflows/ci.yml` runs types, lint, unit and integration tests, the
-production build, formatting and the dependency audit on every push and pull
-request. It installs this repository only.
-
 ## Deployment
 
 Install with dev dependencies, build, then run the compiled server:

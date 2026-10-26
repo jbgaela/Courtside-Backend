@@ -32,8 +32,291 @@ export const GUEST_GENDER_LABELS: Record<GuestGender, string> = {
   NON_BINARY: 'Non-binary',
   PREFER_NOT_TO_SAY: 'Prefer not to say',
 };
+
+export const GUEST_JOIN_POLICIES = ['DISABLED', 'OPEN'] as const;
+export type GuestJoinPolicy = (typeof GUEST_JOIN_POLICIES)[number];
+
+export const GUEST_JOIN_POLICY_LABELS: Record<GuestJoinPolicy, string> = {
+  DISABLED: 'Guests must be added by a Queue Master',
+  OPEN: 'Players can join as guests from the QR code',
+};
+
+export const GUEST_ORIGINS = ['MANAGER', 'SELF'] as const;
+export type GuestOrigin = (typeof GUEST_ORIGINS)[number];
 export const CLUB_ROLES = ['OWNER', 'QUEUE_MASTER', 'PLAYER'] as const;
 export type ClubRole = (typeof CLUB_ROLES)[number];
+
+/* ------------------------------------------------------------------ */
+/* Club-scoped RBAC catalogue                                          */
+/* ------------------------------------------------------------------ */
+
+export const ROLE_SCOPES = ['PLATFORM', 'CLUB'] as const;
+export type RoleScope = (typeof ROLE_SCOPES)[number];
+
+export const CLUB_PERMISSION_GROUPS = [
+  'Clubs',
+  'Members',
+  'Sessions',
+  'Queue & matches',
+  'Scores',
+  'System',
+] as const;
+
+export type ClubPermissionGroup = (typeof CLUB_PERMISSION_GROUPS)[number];
+
+export interface ClubPermissionDefinition {
+  key: string;
+  label: string;
+  description: string;
+  group: ClubPermissionGroup;
+  /** Owner-only controls that cannot be delegated to a custom role. */
+  ownerOnly?: boolean;
+}
+
+/**
+ * Human-readable permission catalogue. The keys are stable; labels and
+ * descriptions are the only things a Super Admin sees in the role editor.
+ */
+export const CLUB_PERMISSION_DEFINITIONS: readonly ClubPermissionDefinition[] = [
+  {
+    key: 'club.view',
+    label: 'View club',
+    description: 'See the club, its public profile and its sessions.',
+    group: 'Clubs',
+  },
+  {
+    key: 'club.manage',
+    label: 'Edit club',
+    description: 'Update the club name, description and venue.',
+    group: 'Clubs',
+  },
+  {
+    key: 'club.courts.manage',
+    label: 'Manage courts',
+    description: 'Add, rename, retire and restore the club courts.',
+    group: 'Clubs',
+  },
+  {
+    key: 'club.members.manage',
+    label: 'Manage members',
+    description: 'Approve requests, remove members and change member roles.',
+    group: 'Members',
+  },
+  {
+    key: 'club.invitations.manage',
+    label: 'Manage invitations',
+    description: 'Invite players and revoke pending invitations.',
+    group: 'Members',
+  },
+  {
+    key: 'sessions.create',
+    label: 'Create sessions',
+    description: 'Create scheduled or immediate open-play sessions.',
+    group: 'Sessions',
+  },
+  {
+    key: 'sessions.manage',
+    label: 'Manage sessions',
+    description: 'Edit session setup, courts, publication and lifecycle.',
+    group: 'Sessions',
+  },
+  {
+    key: 'sessions.checkin.manage',
+    label: 'Manage check-in',
+    description: 'Approve registrations, check players in and record no-shows.',
+    group: 'Sessions',
+  },
+  {
+    key: 'sessions.participants.manage',
+    label: 'Manage participants',
+    description: 'Withdraw or remove participants from a session.',
+    group: 'Sessions',
+  },
+  {
+    key: 'sessions.guests.manage',
+    label: 'Manage guests',
+    description: 'Add, edit, queue and remove guest players.',
+    group: 'Sessions',
+  },
+  {
+    key: 'queue.manage',
+    label: 'Manage queue and rotations',
+    description: 'Generate and commit rotations, swap players and pause the queue.',
+    group: 'Queue & matches',
+  },
+  {
+    key: 'scores.record',
+    label: 'Record scores',
+    description: 'Start matches, record points and complete matches.',
+    group: 'Scores',
+  },
+  {
+    key: 'scores.correct',
+    label: 'Correct results',
+    description: 'Correct a completed match with an audit reason.',
+    group: 'Scores',
+  },
+  {
+    key: 'club.audit.view',
+    label: 'View club audit',
+    description: 'Read the club audit history of privileged actions.',
+    group: 'System',
+  },
+] as const;
+
+export type ClubPermissionKey = (typeof CLUB_PERMISSION_DEFINITIONS)[number]['key'];
+
+export const CLUB_PERMISSION_KEYS = CLUB_PERMISSION_DEFINITIONS.map(
+  (permission) => permission.key,
+) as readonly string[];
+
+export const PLATFORM_PERMISSION_DEFINITIONS = [
+  {
+    key: 'platform.registrations.review',
+    label: 'Review registrations',
+    description: 'Approve, reject and reopen account applications.',
+    group: 'Users',
+  },
+  {
+    key: 'platform.users.view',
+    label: 'View users',
+    description: 'Search the account directory and read account details.',
+    group: 'Users',
+  },
+  {
+    key: 'platform.users.manage',
+    label: 'Manage users',
+    description: 'Suspend, restore, delete, recover and revoke sessions.',
+    group: 'Users',
+  },
+  {
+    key: 'platform.roles.manage',
+    label: 'Manage roles',
+    description: 'Create, edit, duplicate and retire club roles.',
+    group: 'System',
+  },
+  {
+    key: 'platform.audit.view',
+    label: 'View platform audit',
+    description: 'Read the administrative audit trail.',
+    group: 'System',
+  },
+] as const;
+
+export interface BuiltinRoleDefinition {
+  key: string;
+  name: string;
+  description: string;
+  scope: RoleScope;
+  permissions: readonly string[];
+  isSystem: boolean;
+  isProtected: boolean;
+}
+
+/**
+ * Built-in roles are seeded idempotently. Owner and Queue Master remain
+ * protected so a configuration mistake cannot remove the capability to run a
+ * club. Admins can duplicate a built-in role to customize its permissions.
+ */
+export const BUILTIN_ROLE_DEFINITIONS: readonly BuiltinRoleDefinition[] = [
+  {
+    key: 'SUPER_ADMIN',
+    name: 'Super Admin',
+    description: 'Full access to platform users, roles, registrations and audit history.',
+    scope: 'PLATFORM',
+    permissions: PLATFORM_PERMISSION_DEFINITIONS.map((permission) => permission.key),
+    isSystem: true,
+    isProtected: true,
+  },
+  {
+    key: 'OWNER',
+    name: 'Owner',
+    description: 'Full control of the club, including ownership transfer and archive.',
+    scope: 'CLUB',
+    permissions: CLUB_PERMISSION_KEYS,
+    isSystem: true,
+    isProtected: true,
+  },
+  {
+    key: 'QUEUE_MASTER',
+    name: 'Queue Master',
+    description: 'Run sessions, check in players, build rotations and record scores.',
+    scope: 'CLUB',
+    permissions: [
+      'club.view',
+      'club.manage',
+      'club.invitations.manage',
+      'club.courts.manage',
+      'club.audit.view',
+      'sessions.create',
+      'sessions.manage',
+      'sessions.checkin.manage',
+      'sessions.participants.manage',
+      'sessions.guests.manage',
+      'queue.manage',
+      'scores.record',
+      'scores.correct',
+    ],
+    isSystem: true,
+    isProtected: true,
+  },
+  {
+    key: 'PLAYER',
+    name: 'Player',
+    description: 'Join eligible sessions, check in and follow the live queue.',
+    scope: 'CLUB',
+    permissions: ['club.view'],
+    isSystem: true,
+    isProtected: true,
+  },
+] as const;
+
+export const PREVIEW_ROLE_DEFINITIONS: readonly BuiltinRoleDefinition[] = [
+  {
+    key: 'CLUB_MANAGER',
+    name: 'Club Manager',
+    description: 'Manage club information, members, courts and sessions.',
+    scope: 'CLUB',
+    permissions: [
+      'club.view',
+      'club.manage',
+      'club.members.manage',
+      'club.invitations.manage',
+      'club.courts.manage',
+      'club.audit.view',
+      'sessions.create',
+      'sessions.manage',
+      'sessions.checkin.manage',
+      'sessions.participants.manage',
+      'sessions.guests.manage',
+      'queue.manage',
+      'scores.record',
+    ],
+    isSystem: false,
+    isProtected: false,
+  },
+  {
+    key: 'VIEWER',
+    name: 'Viewer',
+    description: 'View-only access to the club and its sessions.',
+    scope: 'CLUB',
+    permissions: ['club.view', 'club.audit.view'],
+    isSystem: false,
+    isProtected: false,
+  },
+] as const;
+
+export const CLUB_PERMISSION_LABELS: Record<string, string> = Object.fromEntries(
+  CLUB_PERMISSION_DEFINITIONS.map((permission) => [permission.key, permission.label]),
+);
+
+export const CLUB_PERMISSION_GROUPS_MAP = CLUB_PERMISSION_DEFINITIONS.reduce<
+  Record<string, ClubPermissionDefinition[]>
+>((groups, permission) => {
+  (groups[permission.group] ??= []).push(permission);
+  return groups;
+}, {});
+
 
 export const MEMBERSHIP_STATUSES = ['PENDING', 'ACTIVE', 'SUSPENDED', 'LEFT'] as const;
 export type MembershipStatus = (typeof MEMBERSHIP_STATUSES)[number];

@@ -26,6 +26,7 @@ export function clubDto(club: Club, extras: Record<string, unknown> = {}) {
 export function membershipDto(
   membership: ClubMembership & {
     user: User & { profile: PlayerProfile | null };
+    roleRef?: { name: string } | null;
   },
   options: { includeEmail: boolean },
 ) {
@@ -37,6 +38,7 @@ export function membershipDto(
     displayName: membership.user.profile?.displayName ?? membership.user.name,
     skillRating: membership.user.profile?.skillRating ?? 3,
     role: membership.role,
+    roleName: membership.roleRef?.name ?? membership.role,
     status: membership.status,
     joinedAt: membership.joinedAt?.toISOString() ?? null,
     createdAt: membership.createdAt.toISOString(),

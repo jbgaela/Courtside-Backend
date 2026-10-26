@@ -1,9 +1,11 @@
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../../src/app.js';
+import { ensureBuiltinRoles } from '../../src/admin/roles.js';
 import { prisma } from '../../src/infrastructure/prisma.js';
 import bcrypt from 'bcryptjs';
 
+await ensureBuiltinRoles();
 export const app = createApp();
 export type Agent = ReturnType<typeof request.agent>;
 
@@ -172,6 +174,7 @@ export interface SessionOptions {
   autoAssign?: boolean;
   courtIds: string[];
   name?: string;
+  guestJoinPolicy?: 'DISABLED' | 'OPEN';
 }
 
 export async function createSession(owner: TestUser, clubId: string, options: SessionOptions) {
@@ -190,6 +193,7 @@ export async function createSession(owner: TestUser, clubId: string, options: Se
       format: options.format ?? 'DOUBLES',
       registrationPolicy: options.registrationPolicy ?? 'OPEN',
       checkInPolicy: options.checkInPolicy ?? 'SELF',
+      guestJoinPolicy: options.guestJoinPolicy ?? 'DISABLED',
       published: options.published ?? true,
       allowLateArrivals: true,
       courtIds: options.courtIds,
@@ -204,6 +208,7 @@ export async function createSession(owner: TestUser, clubId: string, options: Se
     .expect(201);
   return body<{
     id: string;
+    name: string;
     status: string;
     version: number;
     publicId: string;

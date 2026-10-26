@@ -100,3 +100,55 @@ export const adminAuditQuerySchema = adminPaginationSchema.extend({
 export const reauthSchema = z.object({
   password: z.string().min(1).max(128),
 });
+
+export const roleParamsSchema = z.object({
+  roleId: idSchema,
+});
+
+export const roleListQuerySchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  scope: z.enum(['PLATFORM', 'CLUB']).optional(),
+});
+
+export const rolePermissionsSchema = z
+  .array(z.string().trim().min(1).max(80))
+  .min(1)
+  .max(40);
+
+export const createRoleSchema = z
+  .object({
+    name: z.string().trim().min(2).max(80),
+    description: z.string().trim().max(300).nullable().optional(),
+    permissions: rolePermissionsSchema,
+  })
+  .strict();
+
+export const updateRoleSchema = z
+  .object({
+    name: z.string().trim().min(2).max(80).optional(),
+    description: z.string().trim().max(300).nullable().optional(),
+    permissions: rolePermissionsSchema.optional(),
+    expectedVersion: z.number().int().min(1).optional(),
+  })
+  .strict()
+  .refine(
+    (input) =>
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.permissions !== undefined,
+    { message: 'No role fields were supplied' },
+  );
+
+export const assignRoleSchema = z
+  .object({
+    userId: idSchema,
+    clubId: idSchema,
+    roleKey: z.string().trim().min(2).max(80),
+  })
+  .strict();
+
+export const membershipParamsSchema = z.object({
+  membershipId: idSchema,
+});
+
+export const roleAssignmentParamsSchema = userParamsSchema;

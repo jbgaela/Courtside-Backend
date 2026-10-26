@@ -119,6 +119,88 @@ export async function getPublicSession(publicId: string) {
   return sessionPublicData(session);
 }
 
+/**
+ * Public preview for a QR check-in link. Shows only what a person holding the
+ * link needs before signing in: which session it belongs to, when it is, and
+ * whether joining is currently possible. It never exposes player identities.
+ */
+export async function getPublicCheckIn(token: string) {
+  const session = await prisma.playSession.findUnique({
+    where: { checkInToken: token },
+    include: { club: true },
+  });
+  if (!session || session.club.archivedAt) {
+    throw AppError.notFound('This check-in link is not valid');
+  }
+  const [checkedIn, guests, registered, waiting] = await Promise.all([
+    prisma.sessionRegistration.count({ where: { sessionId: session.id, status: 'CHECKED_IN' } }),
+    prisma.sessionGuest.count({ where: { sessionId: session.id, status: 'ACTIVE' } }),
+    prisma.sessionRegistration.count({ where: { sessionId: session.id, status: 'REGISTERED' } }),
+    prisma.queueEntry.count({ where: { sessionId: session.id, state: 'WAITING' } }),
+  ]);
+  const checkedInTotal = checkedIn + guests;
+  const isOpen = ['CHECK_IN_OPEN', 'LIVE'].includes(session.status);
+  const lateAllowed = session.status !== 'LIVE' || session.allowLateArrivals;
+  const full = checkedInTotal >= session.capacity;
+  const availability = !isOpen || !lateAllowed ? 'CLOSED' : full ? 'FULL' : 'OPEN';
+  const closedReason =
+    session.status === 'COMPLETED'
+      ? 'This session has ended.'
+      : session.status === 'CANCELLED'
+        ? 'This session was cancelled.'
+        : session.status === 'DRAFT' || session.status === 'SCHEDULED'
+          ? 'Check-in has not opened yet.'
+          : session.status === 'LIVE' && !session.allowLateArrivals
+            ? 'Late check-in is closed for this session.'
+            : 'Check-in is not open for this session.';
+  const guestJoinEnabled = (session.guestJoinPolicy ?? 'DISABLED') === 'OPEN';
+  const selfCheckInAllowed = session.checkInPolicy !== 'MANAGER';
+  const canGuestJoin = availability === 'OPEN' && guestJoinEnabled && selfCheckInAllowed;
+  const guestJoinReason = !guestJoinEnabled
+    ? 'Guest joining is not enabled for this session.'
+    : !selfCheckInAllowed
+      ? 'This session requires a Queue Master to check players in.'
+      : availability === 'FULL'
+        ? 'This session is full.'
+        : availability === 'CLOSED'
+          ? closedReason
+          : null;
+  return {
+    club: {
+      name: session.club.name,
+      location: session.club.location,
+    },
+    session: {
+      name: session.name,
+      status: session.status,
+      format: session.format,
+      venue: session.venue,
+      timezone: session.timezone,
+      startsAt: session.startsAt.toISOString(),
+      endsAt: session.endsAt.toISOString(),
+      capacity: session.capacity,
+      checkedIn: checkedInTotal,
+      registered,
+      waiting,
+    },
+    join: {
+      availability,
+      canCheckIn: availability === 'OPEN',
+      canGuestJoin,
+      guestJoinEnabled,
+      guestJoinReason,
+      registrationPolicy: session.registrationPolicy,
+      checkInPolicy: session.checkInPolicy,
+      reason:
+        availability === 'CLOSED'
+          ? closedReason
+          : availability === 'FULL'
+            ? 'This session has reached capacity.'
+            : null,
+    },
+  };
+}
+
 export async function getPublicLiveMatches(publicId: string) {
   const session = await getPublishedSession(publicId);
   const matches = await prisma.match.findMany({

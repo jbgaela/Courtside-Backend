@@ -5,8 +5,10 @@ import { env } from './config/env.js';
 import { logger } from './infrastructure/logger.js';
 import { prisma } from './infrastructure/prisma.js';
 import { initRealtime } from './realtime/gateway.js';
+import { ensureBuiltinRoles } from './admin/roles.js';
 
 async function main(): Promise<void> {
+  await ensureBuiltinRoles();
   const app = createApp();
   const server = createServer(app);
   // Bound slow clients and header abuse. Keep the keep-alive window compatible

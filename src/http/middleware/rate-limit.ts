@@ -53,6 +53,15 @@ export const publicReadRateLimit = rateLimit({
   handler: handler('Too many public requests. Slow down.'),
 });
 
+export const guestJoinRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skip: () => env.RATE_LIMIT_DISABLED,
+  handler: handler('Too many guest joining attempts. Ask the Queue Master for help.'),
+});
+
 export const readinessRateLimit = rateLimit({
   windowMs: 60 * 1000,
   limit: 60,

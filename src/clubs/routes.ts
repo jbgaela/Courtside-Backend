@@ -33,6 +33,7 @@ import {
   listCourts,
   listInvitations,
   listMembers,
+  listClubRoles,
   removeMember,
   requestMembership,
   revokeInvitation,
@@ -115,6 +116,15 @@ clubsRouter.get(
     const auth = requireAuth(req);
     const members = await listMembers(param(req, 'clubId'), auth.user.id);
     sendData(res, members);
+  }),
+);
+
+clubsRouter.get(
+  '/:clubId/roles',
+  authenticated,
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    sendData(res, await listClubRoles(param(req, 'clubId'), auth.user.id));
   }),
 );
 

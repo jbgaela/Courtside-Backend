@@ -61,7 +61,7 @@ async function loadMeData(userId: string) {
     where: { id: userId },
     include: {
       profile: true,
-      memberships: { include: { club: true } },
+      memberships: { include: { club: true, roleRef: true } },
     },
   });
 }

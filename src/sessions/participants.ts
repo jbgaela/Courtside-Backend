@@ -3,7 +3,12 @@ import { AppError } from '../http/errors.js';
 import { prisma } from '../infrastructure/prisma.js';
 import { writeAudit } from '../audit/audit.js';
 import { publishSessionEvent } from '../realtime/gateway.js';
-import { getSessionAccess, getSessionByCheckInToken, getSessionForAdmin } from './access.js';
+import {
+  getSessionAccess,
+  getSessionByCheckInToken,
+  getSessionForPermission,
+  hasSessionPermission,
+} from './access.js';
 import { guestParticipantDto, registrationDto } from './serializers.js';
 import { countActiveGuests, countActiveParticipants } from './guests.js';
 import type { Request } from 'express';
@@ -12,10 +17,6 @@ import { requestMetadata } from '../http/middleware/request-id.js';
 interface AuditMeta {
   ip?: string;
   userAgent?: string;
-}
-
-function isAdminRole(role: string): boolean {
-  return role === 'OWNER' || role === 'QUEUE_MASTER';
 }
 
 async function activeParticipantCount(
@@ -189,7 +190,7 @@ export async function cancelRegistration(
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
-  const isAdmin = isAdminRole(access.membership.role);
+  const isAdmin = hasSessionPermission(access, 'sessions.participants.manage');
   const userId = targetUserId ?? actorId;
   if (userId !== actorId && !isAdmin) {
     throw AppError.forbidden('You can only cancel your own registration');
@@ -248,7 +249,7 @@ export async function cancelRegistration(
 }
 
 export async function listRegistrations(sessionId: string, actorId: string) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.checkin.manage');
   const [registrations, guests, queue] = await Promise.all([
     prisma.sessionRegistration.findMany({
       where: { sessionId },
@@ -304,7 +305,7 @@ export async function registrationAction(
   reason: string | undefined,
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.checkin.manage');
   const registration = await prisma.sessionRegistration.findFirst({
     where: { id: registrationId, sessionId },
     include: { user: { include: { profile: true } } },
@@ -379,7 +380,7 @@ export async function checkInPlayer(
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
-  const isAdmin = isAdminRole(access.membership.role);
+  const isAdmin = hasSessionPermission(access, 'sessions.checkin.manage');
   const targetUserId = input.userId ?? actorId;
   const isSelf = targetUserId === actorId;
   if (!isSelf && !isAdmin) throw AppError.forbidden('You can only check yourself in');
@@ -688,7 +689,7 @@ export async function setQueuePaused(
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
-  const isAdmin = isAdminRole(access.membership.role);
+  const isAdmin = hasSessionPermission(access, 'queue.manage');
   const targetParticipantId = input.participantId ?? input.userId ?? actorId;
   if (targetParticipantId !== actorId && !isAdmin) {
     throw AppError.forbidden('You can only change your own queue state');
@@ -777,7 +778,7 @@ export async function leaveSession(
   meta: AuditMeta,
 ) {
   const access = await getSessionAccess(sessionId, actorId);
-  const isAdmin = isAdminRole(access.membership.role);
+  const isAdmin = hasSessionPermission(access, 'queue.manage');
   const targetParticipantId = input.participantId ?? input.userId ?? actorId;
   if (targetParticipantId !== actorId && !isAdmin) {
     throw AppError.forbidden('You can only leave for yourself');

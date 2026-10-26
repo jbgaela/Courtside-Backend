@@ -12,6 +12,8 @@ export function sessionDto(
   session: PlaySession & { club?: Club },
   viewer: {
     role: string | null;
+    roleName?: string | null;
+    permissions?: string[];
     registration?: SessionRegistration | null;
     queueState?: string | null;
   },
@@ -46,6 +48,7 @@ export function sessionDto(
     format: session.format,
     registrationPolicy: session.registrationPolicy,
     checkInPolicy: session.checkInPolicy,
+    guestJoinPolicy: session.guestJoinPolicy === 'OPEN' ? 'OPEN' : 'DISABLED',
     published: session.published,
     allowLateArrivals: session.allowLateArrivals,
     matchmaking:
@@ -60,6 +63,8 @@ export function sessionDto(
     cancelReason: session.cancelReason,
     createdAt: session.createdAt.toISOString(),
     viewerRole: viewer.role,
+    viewerRoleName: viewer.roleName ?? viewer.role,
+    viewerPermissions: viewer.permissions ?? [],
     viewerRegistration: viewer.registration
       ? {
           id: viewer.registration.id,
@@ -119,6 +124,8 @@ export function guestParticipantDto(guest: SessionGuest, queueState: string | nu
     skillRating: guest.skillRating,
     status: active ? 'CHECKED_IN' : 'WITHDRAWN',
     guestStatus: guest.status,
+    origin: guest.origin ?? 'MANAGER',
+    selfJoined: guest.origin === 'SELF',
     version: guest.version,
     registeredAt: guest.createdAt.toISOString(),
     checkedInAt: active ? guest.createdAt.toISOString() : null,
@@ -140,6 +147,8 @@ export function guestDto(guest: SessionGuest, queueState: string | null = null) 
     participantId: guest.id,
     status: guest.status,
     version: guest.version,
+    origin: guest.origin ?? 'MANAGER',
+    selfJoined: guest.origin === 'SELF',
     createdById: guest.createdById,
     createdAt: guest.createdAt.toISOString(),
     updatedAt: guest.updatedAt.toISOString(),

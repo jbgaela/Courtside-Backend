@@ -11,8 +11,8 @@ import { prisma } from '../infrastructure/prisma.js';
 import { env } from '../config/env.js';
 import { generatePublicId, randomToken } from '../security/tokens.js';
 import { writeAudit } from '../audit/audit.js';
-import { getClubAccess, getClubForAdmin } from '../clubs/access.js';
-import { getSessionAccess, getSessionForAdmin } from './access.js';
+import { getClubAccess, getClubForPermission } from '../clubs/access.js';
+import { getSessionAccess, getSessionForPermission } from './access.js';
 import { sessionDto } from './serializers.js';
 import { countActiveGuests, countActiveParticipants } from './guests.js';
 import { publishSessionEvent, revokePublicRoom } from '../realtime/gateway.js';
@@ -107,6 +107,7 @@ export async function createSession(
     format: string;
     registrationPolicy: string;
     checkInPolicy: string;
+    guestJoinPolicy: string;
     published: boolean;
     allowLateArrivals: boolean;
     courtIds: string[];
@@ -115,8 +116,13 @@ export async function createSession(
   },
   meta: AuditMeta,
 ) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'sessions.create');
   await ensureCourtsBelongToClub(clubId, input.courtIds);
+  if (input.guestJoinPolicy === 'OPEN' && input.checkInPolicy === 'MANAGER') {
+    throw AppError.unprocessable(
+      'Guest self-join requires self check-in or self-and-manager check-in',
+    );
+  }
 
   const matchmaking = matchmakingConfigSchema.parse(input.matchmaking ?? {});
   matchmaking.format = input.format === 'SINGLES' ? 'SINGLES' : 'DOUBLES';
@@ -139,6 +145,7 @@ export async function createSession(
         format: matchmaking.format,
         registrationPolicy: input.registrationPolicy,
         checkInPolicy: input.checkInPolicy,
+        guestJoinPolicy: input.guestJoinPolicy,
         published: false,
         allowLateArrivals: input.allowLateArrivals,
         matchmakingConfig: matchmaking as unknown as object,
@@ -269,6 +276,8 @@ export async function listSessions(
       session,
       {
         role: access.membership.role,
+        roleName: access.membership.roleRef?.name ?? access.membership.role,
+        permissions: access.permissions,
         registration: regMap.get(session.id) ?? null,
         queueState: queueMap.get(session.id)?.state ?? null,
       },
@@ -304,6 +313,8 @@ export async function getSessionDetail(sessionId: string, userId: string) {
     access.session,
     {
       role: access.membership.role,
+      roleName: access.membership.roleRef?.name ?? access.membership.role,
+      permissions: access.permissions,
       registration,
       queueState: queue?.state ?? null,
     },
@@ -325,6 +336,7 @@ export async function updateSession(
     format?: string;
     registrationPolicy?: string;
     checkInPolicy?: string;
+    guestJoinPolicy?: string;
     allowLateArrivals?: boolean;
     courtIds?: string[];
     matchmaking?: unknown;
@@ -333,7 +345,7 @@ export async function updateSession(
   },
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.manage');
   const session = access.session;
   if (['LIVE', 'COMPLETED', 'CANCELLED'].includes(session.status)) {
     throw AppError.conflict('Session configuration cannot be changed after the session starts');
@@ -343,6 +355,13 @@ export async function updateSession(
   const startsAt = input.startsAt ? new Date(input.startsAt) : session.startsAt;
   const endsAt = input.endsAt ? new Date(input.endsAt) : session.endsAt;
   if (endsAt <= startsAt) throw AppError.badRequest('End time must be after start time');
+  const effectiveGuestJoinPolicy = input.guestJoinPolicy ?? session.guestJoinPolicy ?? 'DISABLED';
+  const effectiveCheckInPolicy = input.checkInPolicy ?? session.checkInPolicy;
+  if (effectiveGuestJoinPolicy === 'OPEN' && effectiveCheckInPolicy === 'MANAGER') {
+    throw AppError.unprocessable(
+      'Guest self-join requires self check-in or self-and-manager check-in',
+    );
+  }
 
   if (input.capacity !== undefined) {
     const active = await countActiveParticipants(sessionId);
@@ -381,6 +400,9 @@ export async function updateSession(
           ? { registrationPolicy: input.registrationPolicy }
           : {}),
         ...(input.checkInPolicy !== undefined ? { checkInPolicy: input.checkInPolicy } : {}),
+        ...(input.guestJoinPolicy !== undefined
+          ? { guestJoinPolicy: input.guestJoinPolicy }
+          : {}),
         ...(input.allowLateArrivals !== undefined
           ? { allowLateArrivals: input.allowLateArrivals }
           : {}),
@@ -425,7 +447,7 @@ export async function updateSessionCourts(
   input: { courtIds: string[]; expectedVersion?: number },
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.manage');
   if (['LIVE', 'COMPLETED', 'CANCELLED'].includes(access.session.status)) {
     throw AppError.conflict('Courts cannot be changed after the session starts');
   }
@@ -473,7 +495,7 @@ export async function transitionSession(
   input: { status: SessionStatus; reason?: string; force: boolean; expectedVersion?: number },
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.manage');
   const session = access.session;
   const current = session.status as SessionStatus;
   if (current === input.status) {
@@ -634,13 +656,71 @@ export async function transitionSession(
   return getSessionDetail(sessionId, actorId);
 }
 
+export async function updateGuestJoinPolicy(
+  sessionId: string,
+  actorId: string,
+  input: { guestJoinPolicy: string; expectedVersion?: number },
+  meta: AuditMeta,
+) {
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.manage');
+  const session = access.session;
+  if (['COMPLETED', 'CANCELLED'].includes(session.status)) {
+    throw AppError.conflict('This session has ended');
+  }
+  if (input.guestJoinPolicy !== 'OPEN' && input.guestJoinPolicy !== 'DISABLED') {
+    throw AppError.unprocessable('Choose a valid guest joining policy');
+  }
+  if (input.guestJoinPolicy === 'OPEN' && session.checkInPolicy === 'MANAGER') {
+    throw AppError.conflict(
+      'Switch check-in to self-service or self-and-manager before enabling guest self-join',
+    );
+  }
+  if (input.expectedVersion !== undefined && input.expectedVersion !== session.version) {
+    throw AppError.conflict('This session changed. Refresh and try again.');
+  }
+  const updated = await prisma.playSession.updateMany({
+    where: { id: sessionId, version: session.version },
+    data: { guestJoinPolicy: input.guestJoinPolicy, version: { increment: 1 } },
+  });
+  if (updated.count === 0) {
+    throw AppError.conflict('This session changed. Refresh and try again.');
+  }
+  const next = await prisma.playSession.findUniqueOrThrow({
+    where: { id: sessionId },
+    select: { version: true },
+  });
+  await writeAudit(prisma, {
+    clubId: session.clubId,
+    sessionId,
+    actorId,
+    action: 'session.guest_policy_updated',
+    entityType: 'PlaySession',
+    entityId: sessionId,
+    summary:
+      input.guestJoinPolicy === 'OPEN'
+        ? 'Guest self-join enabled for the QR code'
+        : 'Guest self-join disabled for the QR code',
+    metadata: { previousPolicy: session.guestJoinPolicy ?? 'DISABLED', guestJoinPolicy: input.guestJoinPolicy },
+    ip: meta.ip,
+    userAgent: meta.userAgent,
+  });
+  publishSessionEvent({
+    sessionId,
+    publicId: session.publicId,
+    type: 'session.guest_policy_updated',
+    version: next.version,
+    payload: { guestJoinPolicy: input.guestJoinPolicy },
+  });
+  return getSessionDetail(sessionId, actorId);
+}
+
 export async function publishSession(
   sessionId: string,
   actorId: string,
   published: boolean,
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.manage');
   if (published && access.session.status === 'DRAFT') {
     throw AppError.conflict('Schedule the session before publishing it');
   }
@@ -671,7 +751,7 @@ export async function publishSession(
 }
 
 export async function getSessionPublicLink(sessionId: string, userId: string) {
-  const access = await getSessionForAdmin(sessionId, userId);
+  const access = await getSessionForPermission(sessionId, userId, 'sessions.manage');
   return {
     publicId: access.session.publicId,
     published: access.session.published,

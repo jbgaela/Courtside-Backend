@@ -26,7 +26,7 @@ import { logger } from '../infrastructure/logger.js';
 import { env } from '../config/env.js';
 import { generatePublicId } from '../security/tokens.js';
 import { writeAudit } from '../audit/audit.js';
-import { getSessionAccess, getSessionForAdmin } from '../sessions/access.js';
+import { getSessionAccess, getSessionForPermission } from '../sessions/access.js';
 import { publishSessionEvent } from '../realtime/gateway.js';
 import { matchDto } from '../matches/serializers.js';
 import { selectedPlayerSchema } from './schemas.js';
@@ -296,7 +296,7 @@ export async function createPreview(
   actorId: string,
   input: { maxAssignments?: number } = {},
 ): Promise<RotationDto> {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'queue.manage');
   if (access.session.status !== 'LIVE') {
     throw AppError.conflict('Rotations can only be generated for a live session');
   }
@@ -394,7 +394,7 @@ export async function commitRotation(
   input: { rotationId: string; expectedSessionVersion: number; idempotencyKey?: string },
   meta: AuditMeta & { userAgent?: string } = {},
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'queue.manage');
   if (access.session.status !== 'LIVE') {
     throw AppError.conflict('Rotations can only be committed for a live session');
   }
@@ -700,7 +700,7 @@ export async function overridePreviewPlayer(
   input: { playerUserId: string; replacementUserId: string },
   meta: AuditMeta,
 ): Promise<RotationDto> {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'queue.manage');
   if (access.session.status !== 'LIVE') {
     throw AppError.conflict('Rotations can only be overridden for a live session');
   }
@@ -895,7 +895,7 @@ export async function cancelPreview(
   rotationId: string,
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'queue.manage');
   const rotation = await prisma.rotationRun.findFirst({
     where: { id: rotationId, sessionId },
   });

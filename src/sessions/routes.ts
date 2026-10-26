@@ -11,6 +11,7 @@ import {
   checkInSchema,
   createGuestSchema,
   createSessionSchema,
+  guestPolicySchema,
   publishSchema,
   qrCheckInSchema,
   queueActionSchema,
@@ -30,6 +31,7 @@ import {
   listSessions,
   publishSession,
   transitionSession,
+  updateGuestJoinPolicy,
   updateSession,
   updateSessionCourts,
 } from './service.js';
@@ -149,6 +151,25 @@ sessionsRouter.post(
         param(req, 'sessionId'),
         auth.user.id,
         req.body.published,
+        requestMetadata(req),
+      ),
+    );
+  }),
+);
+
+sessionsRouter.patch(
+  '/:sessionId/guest-policy',
+  authenticated,
+  emailVerified,
+  validateBody(guestPolicySchema),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    sendData(
+      res,
+      await updateGuestJoinPolicy(
+        param(req, 'sessionId'),
+        auth.user.id,
+        { guestJoinPolicy: req.body.guestJoinPolicy, expectedVersion: req.body.expectedVersion },
         requestMetadata(req),
       ),
     );

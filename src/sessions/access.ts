@@ -1,14 +1,15 @@
-import type { Club, ClubMembership, PlaySession } from '@prisma/client';
+import type { Club, ClubMembership, PlaySession, Role } from '@prisma/client';
 import { AppError } from '../http/errors.js';
 import { prisma } from '../infrastructure/prisma.js';
-import { ADMIN_ROLES } from '../clubs/access.js';
+import { hasClubPermission } from '../clubs/access.js';
 import type { ClubRole } from '@picklequeue/contracts';
 
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
 
 export interface SessionAccess {
   session: PlaySession & { club: Club };
-  membership: ClubMembership;
+  membership: ClubMembership & { roleRef: Role | null };
+  permissions: string[];
 }
 
 export async function getSessionAccess(
@@ -25,6 +26,7 @@ export async function getSessionAccess(
   if (session.club.archivedAt) throw AppError.gone('This club has been archived');
   const membership = await prisma.clubMembership.findUnique({
     where: { clubId_userId: { clubId: session.clubId, userId } },
+    include: { roleRef: true },
   });
   if (!membership || membership.status !== 'ACTIVE') {
     throw AppError.forbidden('You do not have access to this session');
@@ -32,14 +34,39 @@ export async function getSessionAccess(
   if (options.roles && !options.roles.includes(membership.role as ClubRole)) {
     throw AppError.forbidden('This action requires a club administrator role');
   }
-  return { session, membership };
+  return {
+    session,
+    membership,
+    permissions: membership.roleRef?.permissions ?? [],
+  };
+}
+
+export function hasSessionPermission(access: SessionAccess, permission: string): boolean {
+  return hasClubPermission(access, permission);
+}
+
+export function requireSessionPermission(access: SessionAccess, permission: string): void {
+  if (!hasClubPermission(access, permission)) {
+    throw AppError.forbidden('You do not have permission to perform this action');
+  }
+}
+
+export async function getSessionForPermission(
+  sessionId: string,
+  userId: string,
+  permission: string,
+): Promise<SessionAccess> {
+  const access = await getSessionAccess(sessionId, userId);
+  requireSessionPermission(access, permission);
+  return access;
 }
 
 export async function getSessionForAdmin(
   sessionId: string,
   userId: string,
+  permission = 'sessions.manage',
 ): Promise<SessionAccess> {
-  return getSessionAccess(sessionId, userId, { roles: ADMIN_ROLES });
+  return getSessionForPermission(sessionId, userId, permission);
 }
 
 export async function getSessionByCheckInToken(token: string) {

@@ -3,7 +3,7 @@ import { AppError } from '../http/errors.js';
 import { prisma } from '../infrastructure/prisma.js';
 import { writeAudit } from '../audit/audit.js';
 import { publishSessionEvent } from '../realtime/gateway.js';
-import { getSessionForAdmin } from './access.js';
+import { getSessionForPermission } from './access.js';
 import { guestDto } from './serializers.js';
 
 interface AuditMeta {
@@ -78,7 +78,7 @@ export async function createGuest(
   input: { displayName: string; gender: string; skillRating: number; addToQueue: boolean },
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.guests.manage');
   assertGuestWindow(access.session);
 
   const now = new Date();
@@ -169,7 +169,7 @@ export async function updateGuest(
   },
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.guests.manage');
   assertSessionNotEnded(access.session);
   const guest = await findGuest(sessionId, guestId);
   if (guest.status !== 'ACTIVE') throw AppError.conflict('This guest has been removed');
@@ -273,7 +273,7 @@ export async function removeGuest(
   guestId: string,
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.guests.manage');
   assertSessionNotEnded(access.session);
   const guest = await findGuest(sessionId, guestId);
   if (guest.status === 'REMOVED') {
@@ -358,7 +358,7 @@ export async function enqueueGuest(
   guestId: string,
   meta: AuditMeta,
 ) {
-  const access = await getSessionForAdmin(sessionId, actorId);
+  const access = await getSessionForPermission(sessionId, actorId, 'sessions.guests.manage');
   assertGuestWindow(access.session);
   const guest = await findGuest(sessionId, guestId);
   if (guest.status !== 'ACTIVE') throw AppError.conflict('This guest has been removed');

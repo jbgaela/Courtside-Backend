@@ -7,6 +7,7 @@ import {
   type ScoringConfig,
 } from '@picklequeue/contracts';
 import { prisma } from '../src/infrastructure/prisma.js';
+import { ensureBuiltinRoles, seedPreviewRoles } from '../src/admin/roles.js';
 
 const DEMO_CLUB_SLUG = 'riverside-pickleball';
 const PASSWORD = process.env.SEED_PASSWORD ?? 'PickleQueue123!';
@@ -253,6 +254,8 @@ async function upsertApprovalDemoRegistrations(): Promise<void> {
 async function main(): Promise<void> {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   if (!process.env.NODE_ENV) throw new Error('NODE_ENV is required');
+  await ensureBuiltinRoles();
+  await seedPreviewRoles();
   if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SEED !== 'true') {
     throw new Error(
       'Refusing to seed demo accounts in production. Set ALLOW_DEMO_SEED=true only for a disposable demo environment.',

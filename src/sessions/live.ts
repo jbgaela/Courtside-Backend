@@ -39,7 +39,11 @@ export async function getLiveSnapshot(sessionId: string, userId: string) {
   return {
     session: sessionDto(
       access.session,
-      { role: access.membership.role },
+      {
+        role: access.membership.role,
+        roleName: access.membership.roleRef?.name ?? access.membership.role,
+        permissions: access.permissions,
+      },
       {
         counts: {
           registered: queue.counts.registered,

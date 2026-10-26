@@ -1,11 +1,11 @@
 import { Prisma } from '@prisma/client';
-import type { ClubMembership } from '@prisma/client';
+import type { ClubMembership, Role } from '@prisma/client';
 import { env } from '../config/env.js';
 import { AppError } from '../http/errors.js';
 import { prisma } from '../infrastructure/prisma.js';
 import { randomToken, sha256, slugify } from '../security/tokens.js';
 import { writeAudit } from '../audit/audit.js';
-import { getClubAccess, getClubForAdmin, getClubForOwner } from './access.js';
+import { getClubAccess, getClubForPermission, getClubForOwner, hasClubPermission } from './access.js';
 import { publishSessionEvent, revokePublicRoom } from '../realtime/gateway.js';
 import { clubDto, courtDto, invitationDto, membershipDto } from './serializers.js';
 
@@ -124,10 +124,11 @@ export async function getClub(identifier: string, userId?: string) {
   const club = await prisma.club.findFirst({ where });
   if (!club) throw AppError.notFound('Club not found');
 
-  let membership: ClubMembership | null = null;
+  let membership: (ClubMembership & { roleRef: Role | null }) | null = null;
   if (userId) {
     membership = await prisma.clubMembership.findUnique({
       where: { clubId_userId: { clubId: club.id, userId } },
+      include: { roleRef: true },
     });
   }
   if (club.archivedAt && membership?.role !== 'OWNER') {
@@ -145,6 +146,11 @@ export async function getClub(identifier: string, userId?: string) {
   });
   return clubDto(club, {
     viewerRole: membership?.status === 'ACTIVE' ? membership.role : null,
+    viewerRoleName:
+      membership?.status === 'ACTIVE'
+        ? (membership.roleRef?.name ?? membership.role)
+        : null,
+    viewerPermissions: membership?.status === 'ACTIVE' ? (membership.roleRef?.permissions ?? []) : [],
     membershipStatus: membership?.status ?? null,
     memberCount,
     upcomingSessions,
@@ -163,7 +169,7 @@ export async function updateClub(
   },
   meta: AuditMeta,
 ) {
-  const access = await getClubForAdmin(clubId, userId);
+  const access = await getClubForPermission(clubId, userId, 'club.manage');
   if (input.joinPolicy && access.membership.role !== 'OWNER') {
     throw AppError.forbidden('Only the club owner can change the join policy');
   }
@@ -197,13 +203,46 @@ export async function updateClub(
 export async function listMembers(clubId: string, userId: string) {
   const access = await getClubAccess(clubId, userId);
   const includeEmail =
-    access.membership.role === 'OWNER' || access.membership.role === 'QUEUE_MASTER';
+    hasClubPermission(access, 'club.members.manage') ||
+    hasClubPermission(access, 'club.invitations.manage');
   const memberships = await prisma.clubMembership.findMany({
     where: { clubId, status: { in: ['ACTIVE', 'PENDING', 'SUSPENDED'] } },
-    include: { user: { include: { profile: true } } },
+    include: { user: { include: { profile: true } }, roleRef: true },
     orderBy: [{ status: 'asc' }, { role: 'asc' }, { createdAt: 'asc' }],
   });
   return memberships.map((membership) => membershipDto(membership, { includeEmail }));
+}
+
+/**
+ * Roles that can be assigned inside one club. Protected system roles are
+ * included so the owner can still assign Queue Master; the backend enforces
+ * who may assign what.
+ */
+export async function listClubRoles(clubId: string, userId: string) {
+  const access = await getClubAccess(clubId, userId);
+  if (
+    !hasClubPermission(access, 'club.members.manage') &&
+    !hasClubPermission(access, 'club.invitations.manage')
+  ) {
+    throw AppError.forbidden('You do not have permission to view club roles');
+  }
+  const roles = await prisma.role.findMany({
+    where: { scope: 'CLUB', archivedAt: { isSet: false } },
+    orderBy: [{ isProtected: 'desc' }, { name: 'asc' }],
+  });
+  return roles
+    .filter((role) => {
+      if (access.membership.role === 'OWNER') return true;
+      const allowed = new Set(access.permissions);
+      return role.permissions.every((permission) => allowed.has(permission));
+    })
+    .map((role) => ({
+      key: role.key,
+      name: role.name,
+      description: role.description,
+      permissions: role.permissions,
+      isProtected: role.isProtected,
+    }));
 }
 
 export async function requestMembership(clubId: string, userId: string, meta: AuditMeta) {
@@ -311,7 +350,7 @@ export async function updateMember(
   input: { role?: string; status?: string },
   meta: AuditMeta,
 ) {
-  await getClubForOwner(clubId, actorId);
+  const access = await getClubForPermission(clubId, actorId, 'club.members.manage');
   const target = await prisma.clubMembership.findFirst({ where: { id: membershipId, clubId } });
   if (!target) throw AppError.notFound('Membership not found');
   if (target.role === 'OWNER') {
@@ -323,6 +362,31 @@ export async function updateMember(
   if (input.role === 'OWNER') {
     throw AppError.badRequest('Use the ownership transfer workflow');
   }
+  const isOwner = access.membership.role === 'OWNER';
+  if (input.role && !isOwner) {
+    throw AppError.forbidden('Only the club owner can change member roles');
+  }
+  if (!isOwner) {
+    const targetRole = await prisma.role.findUnique({ where: { key: target.role } });
+    if (targetRole) {
+      const allowed = new Set(access.permissions);
+      if (!targetRole.permissions.every((permission) => allowed.has(permission))) {
+        throw AppError.forbidden('You cannot change a member with more access than your own');
+      }
+    }
+  }
+  if (input.role) {
+    const role = await prisma.role.findUnique({ where: { key: input.role } });
+    if (!role || role.archivedAt || role.scope !== 'CLUB') {
+      throw AppError.unprocessable('Choose an active club role');
+    }
+    if (!isOwner) {
+      const allowed = new Set(access.permissions);
+      if (!role.permissions.every((permission) => allowed.has(permission))) {
+        throw AppError.forbidden('You cannot assign a role with more access than your own');
+      }
+    }
+  }
   const { membership, sessions } = await prisma.$transaction(async (tx) => {
     const saved = await tx.clubMembership.update({
       where: { id: target.id },
@@ -331,7 +395,7 @@ export async function updateMember(
         ...(input.status ? { status: input.status } : {}),
         ...(input.status === 'ACTIVE' && !target.joinedAt ? { joinedAt: new Date() } : {}),
       },
-      include: { user: { include: { profile: true } } },
+      include: { user: { include: { profile: true } }, roleRef: true },
     });
     const changedSessions =
       input.status && input.status !== 'ACTIVE'
@@ -360,10 +424,19 @@ export async function removeMember(
   membershipId: string,
   meta: AuditMeta,
 ) {
-  await getClubForOwner(clubId, actorId);
+  const access = await getClubForPermission(clubId, actorId, 'club.members.manage');
   const target = await prisma.clubMembership.findFirst({ where: { id: membershipId, clubId } });
   if (!target) throw AppError.notFound('Membership not found');
   if (target.role === 'OWNER') throw AppError.forbidden('The owner cannot be removed');
+  if (access.membership.role !== 'OWNER') {
+    const targetRole = await prisma.role.findUnique({ where: { key: target.role } });
+    if (targetRole) {
+      const allowed = new Set(access.permissions);
+      if (!targetRole.permissions.every((permission) => allowed.has(permission))) {
+        throw AppError.forbidden('You cannot remove a member with more access than your own');
+      }
+    }
+  }
   const { membership, sessions } = await prisma.$transaction(async (tx) => {
     const saved = await tx.clubMembership.update({
       where: { id: target.id },
@@ -492,10 +565,20 @@ export async function createInvitation(
   input: { email: string; role: string },
   meta: AuditMeta,
 ) {
-  const access = await getClubForAdmin(clubId, actorId);
+  const access = await getClubForPermission(clubId, actorId, 'club.invitations.manage');
   if (input.role === 'OWNER') throw AppError.badRequest('Ownership cannot be invited');
-  if (input.role === 'QUEUE_MASTER' && access.membership.role !== 'OWNER') {
-    throw AppError.forbidden('Only the club owner can invite Queue Masters');
+  const invitedRole = await prisma.role.findUnique({ where: { key: input.role } });
+  if (!invitedRole || invitedRole.archivedAt || invitedRole.scope !== 'CLUB') {
+    throw AppError.unprocessable('Choose an active club role');
+  }
+  if (access.membership.role !== 'OWNER') {
+    if (invitedRole.key === 'QUEUE_MASTER') {
+      throw AppError.forbidden('Only the club owner can invite Queue Masters');
+    }
+    const allowed = new Set(access.permissions);
+    if (!invitedRole.permissions.every((permission) => allowed.has(permission))) {
+      throw AppError.forbidden('You cannot invite someone with more access than your own');
+    }
   }
   const existingUser = await prisma.user.findUnique({ where: { email: input.email } });
   if (existingUser) {
@@ -540,7 +623,7 @@ export async function createInvitation(
 }
 
 export async function listInvitations(clubId: string, actorId: string) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.invitations.manage');
   const invitations = await prisma.clubInvitation.findMany({
     where: { clubId },
     orderBy: { createdAt: 'desc' },
@@ -550,7 +633,7 @@ export async function listInvitations(clubId: string, actorId: string) {
 }
 
 export async function revokeInvitation(clubId: string, actorId: string, invitationId: string) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.invitations.manage');
   const invitation = await prisma.clubInvitation.findFirst({
     where: { id: invitationId, clubId },
   });
@@ -628,7 +711,7 @@ export async function acceptInvitation(
 }
 
 export async function listAudit(clubId: string, actorId: string, limit = 100) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.audit.view');
   const events = await prisma.auditEvent.findMany({
     where: { clubId },
     orderBy: { createdAt: 'desc' },
@@ -661,7 +744,7 @@ export async function createCourt(
   input: { name: string; sortOrder: number },
   meta: AuditMeta,
 ) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.courts.manage');
   try {
     const court = await prisma.court.create({
       data: {
@@ -697,7 +780,7 @@ export async function updateCourt(
   input: { name?: string; status?: string; sortOrder?: number },
   meta: AuditMeta,
 ) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.courts.manage');
   const existing = await prisma.court.findFirst({ where: { id: courtId, clubId } });
   if (!existing) throw AppError.notFound('Court not found');
   if (input.status !== undefined && input.status !== existing.status) {
@@ -752,7 +835,7 @@ export async function deactivateCourt(
   actorId: string,
   meta: AuditMeta,
 ) {
-  await getClubForAdmin(clubId, actorId);
+  await getClubForPermission(clubId, actorId, 'club.courts.manage');
   const existing = await prisma.court.findFirst({ where: { id: courtId, clubId } });
   if (!existing) throw AppError.notFound('Court not found');
   const activeMatches = await prisma.match.count({

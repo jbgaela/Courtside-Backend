@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   CHECK_IN_POLICIES,
   GUEST_GENDERS,
+  GUEST_JOIN_POLICIES,
   MATCH_FORMATS,
   REGISTRATION_POLICIES,
   SESSION_STATUSES,
@@ -50,6 +51,8 @@ const participantNameSchema = z
   .max(80, 'Player name must be 80 characters or fewer')
   .regex(/^[^\u0000-\u001f\u007f]*$/u, 'Player name contains invalid characters');
 
+export const guestNameSchema = participantNameSchema;
+
 const guestSkillSchema = z
   .number()
   .min(SKILL_MIN, `Skill must be between ${SKILL_MIN} and ${SKILL_MAX}`)
@@ -58,6 +61,8 @@ const guestSkillSchema = z
     (value) => Math.abs(value / SKILL_STEP - Math.round(value / SKILL_STEP)) < 1e-9,
     `Skill must be in ${SKILL_STEP} increments`,
   );
+
+export const guestSkillValueSchema = guestSkillSchema;
 
 export const createSessionSchema = z
   .object({
@@ -71,6 +76,7 @@ export const createSessionSchema = z
     format: z.enum(MATCH_FORMATS).default('DOUBLES'),
     registrationPolicy: z.enum(REGISTRATION_POLICIES).default('OPEN'),
     checkInPolicy: z.enum(CHECK_IN_POLICIES).default('SELF'),
+    guestJoinPolicy: z.enum(GUEST_JOIN_POLICIES).default('DISABLED'),
     published: z.boolean().default(false),
     allowLateArrivals: z.boolean().default(true),
     courtIds: courtIdsSchema,
@@ -99,6 +105,7 @@ export const updateSessionSchema = z
     format: z.enum(MATCH_FORMATS).optional(),
     registrationPolicy: z.enum(REGISTRATION_POLICIES).optional(),
     checkInPolicy: z.enum(CHECK_IN_POLICIES).optional(),
+    guestJoinPolicy: z.enum(GUEST_JOIN_POLICIES).optional(),
     allowLateArrivals: z.boolean().optional(),
     courtIds: courtIdsSchema.optional(),
     matchmaking: z.unknown().optional(),
@@ -122,6 +129,11 @@ export const transitionSchema = z.object({
 
 export const publishSchema = z.object({
   published: z.boolean(),
+  expectedVersion: z.number().int().min(1).optional(),
+});
+
+export const guestPolicySchema = z.object({
+  guestJoinPolicy: z.enum(GUEST_JOIN_POLICIES),
   expectedVersion: z.number().int().min(1).optional(),
 });
 

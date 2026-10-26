@@ -31,7 +31,6 @@ import { maybeAutoRotate } from '../matchmaking/service.js';
 import { matchDto } from './serializers.js';
 
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
-const WRITE_ROLES = ['OWNER', 'QUEUE_MASTER'];
 
 interface AuditMeta {
   ip?: string;
@@ -48,6 +47,7 @@ type MatchWithAll = Match & {
 export interface MatchAccess {
   match: MatchWithAll;
   role: string;
+  permissions: string[];
   session: PlaySession;
 }
 
@@ -65,20 +65,34 @@ export async function getMatchAccess(matchId: string, userId: string): Promise<M
   if (!match) throw AppError.notFound('Match not found');
   const membership = await prisma.clubMembership.findUnique({
     where: { clubId_userId: { clubId: match.clubId, userId } },
+    include: { roleRef: true },
   });
   if (!membership || membership.status !== 'ACTIVE') {
     throw AppError.forbidden('You do not have access to this match');
   }
   const session = match.session!;
-  return { match, role: membership.role, session };
+  return {
+    match,
+    role: membership.role,
+    permissions: membership.roleRef?.permissions ?? [],
+    session,
+  };
+}
+
+async function getMatchForPermission(
+  matchId: string,
+  userId: string,
+  permission: string,
+): Promise<MatchAccess> {
+  const access = await getMatchAccess(matchId, userId);
+  if (access.role !== 'OWNER' && !access.permissions.includes(permission)) {
+    throw AppError.forbidden('You do not have permission to manage this match');
+  }
+  return access;
 }
 
 async function getMatchForAdmin(matchId: string, userId: string): Promise<MatchAccess> {
-  const access = await getMatchAccess(matchId, userId);
-  if (!WRITE_ROLES.includes(access.role)) {
-    throw AppError.forbidden('Only a Queue Master can manage this match');
-  }
-  return access;
+  return getMatchForPermission(matchId, userId, 'scores.record');
 }
 
 function scoringConfig(match: Match): ScoringConfig {
@@ -542,7 +556,7 @@ export async function correctMatch(
   input: { games: GameScore[]; reason: string; expectedVersion?: number },
   meta: AuditMeta,
 ) {
-  const access = await getMatchForAdmin(matchId, actorId);
+  const access = await getMatchForPermission(matchId, actorId, 'scores.correct');
   const match = access.match;
   if (!access.match.result) throw AppError.conflict('Match has no recorded result to correct');
   if (match.status !== 'COMPLETED' && match.status !== 'CORRECTED') {
@@ -676,7 +690,7 @@ export async function getMatchDetail(matchId: string, userId: string) {
 }
 
 export async function getMatchEvents(matchId: string, userId: string) {
-  await getMatchForAdmin(matchId, userId);
+  await getMatchForPermission(matchId, userId, 'scores.record');
   const events = await prisma.scoreEvent.findMany({
     where: { matchId },
     orderBy: { sequence: 'asc' },

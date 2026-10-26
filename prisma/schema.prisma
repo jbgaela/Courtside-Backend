@@ -17,42 +17,42 @@ model User {
   passwordHash    String
   name            String
   emailVerifiedAt DateTime?
-  platformRole    String   @default("USER")
-  accountStatus   String   @default("ACTIVE")
+  platformRole    String    @default("USER")
+  accountStatus   String    @default("ACTIVE")
   activatedAt     DateTime?
   deletedAt       DateTime?
   termsAcceptedAt DateTime?
-  sessionVersion  Int      @default(0)
-  mfaEnabled      Boolean  @default(false)
+  sessionVersion  Int       @default(0)
+  mfaEnabled      Boolean   @default(false)
   mfaSecret       String?
   mfaEnrolledAt   DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  profile                   PlayerProfile?
-  authSessions              AuthSession[]
-  emailTokens               EmailToken[]
-  registrationReview        RegistrationReview?
-  registrationSessions      RegistrationSession[]
-  mfaChallenges             MfaChallenge[]
-  accountClaimTokens        AccountClaimToken[]
-  accountRecoveryTokens     AccountRecoveryToken[]
-  reviewedRegistrations     RegistrationReview[]      @relation("RegistrationReviewer")
-  memberships               ClubMembership[]
-  ownedClubs                Club[]                    @relation("ClubOwner")
-  createdInvitations        ClubInvitation[]          @relation("InvitationCreator")
-  acceptedInvitations       ClubInvitation[]          @relation("InvitationAccepted")
-  createdSessions           PlaySession[]             @relation("SessionCreator")
-  createdGuests             SessionGuest[]             @relation("GuestCreator")
-  sessionRegistrations      SessionRegistration[]
-  queueEntries              QueueEntry[]
-  skillRatings              SkillRating[]
-  matchParticipants         MatchParticipant[]
-  scoreEvents               ScoreEvent[]
-  auditEvents               AuditEvent[]              @relation("AuditActor")
-  adminAuditEvents          AdministrativeAuditEvent[] @relation("AdminAuditActor")
-  adminAuditTargets         AdministrativeAuditEvent[] @relation("AdminAuditTarget")
-  notifications             Notification[]
+  profile               PlayerProfile?
+  authSessions          AuthSession[]
+  emailTokens           EmailToken[]
+  registrationReview    RegistrationReview?
+  registrationSessions  RegistrationSession[]
+  mfaChallenges         MfaChallenge[]
+  accountClaimTokens    AccountClaimToken[]
+  accountRecoveryTokens AccountRecoveryToken[]
+  reviewedRegistrations RegistrationReview[]       @relation("RegistrationReviewer")
+  memberships           ClubMembership[]
+  ownedClubs            Club[]                     @relation("ClubOwner")
+  createdInvitations    ClubInvitation[]           @relation("InvitationCreator")
+  acceptedInvitations   ClubInvitation[]           @relation("InvitationAccepted")
+  createdSessions       PlaySession[]              @relation("SessionCreator")
+  createdGuests         SessionGuest[]             @relation("GuestCreator")
+  sessionRegistrations  SessionRegistration[]
+  queueEntries          QueueEntry[]
+  skillRatings          SkillRating[]
+  matchParticipants     MatchParticipant[]
+  scoreEvents           ScoreEvent[]
+  auditEvents           AuditEvent[]               @relation("AuditActor")
+  adminAuditEvents      AdministrativeAuditEvent[] @relation("AdminAuditActor")
+  adminAuditTargets     AdministrativeAuditEvent[] @relation("AdminAuditTarget")
+  notifications         Notification[]
 
   @@index([emailVerifiedAt])
   @@index([platformRole, accountStatus])
@@ -76,17 +76,17 @@ model PlayerProfile {
 }
 
 model AuthSession {
-  id         String    @id @default(auto()) @map("_id") @db.ObjectId
-  userId     String    @db.ObjectId
-  tokenHash  String    @unique
-  csrfToken  String
-  expiresAt  DateTime
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String    @db.ObjectId
+  tokenHash         String    @unique
+  csrfToken         String
+  expiresAt         DateTime
   revokedAt         DateTime?
-  lastUsedAt        DateTime @default(now())
+  lastUsedAt        DateTime  @default(now())
   reauthenticatedAt DateTime?
   ip                String?
-  userAgent  String?
-  createdAt  DateTime  @default(now())
+  userAgent         String?
+  createdAt         DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -147,12 +147,37 @@ model ClubMembership {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  club Club @relation(fields: [clubId], references: [id])
-  user User @relation(fields: [userId], references: [id])
+  club    Club  @relation(fields: [clubId], references: [id])
+  user    User  @relation(fields: [userId], references: [id])
+  roleRef Role? @relation(fields: [role], references: [key])
 
   @@unique([clubId, userId])
   @@index([userId, status])
   @@index([clubId, status, role])
+}
+
+/// Configurable club roles and protected system roles.
+///
+/// `scope` is currently CLUB or PLATFORM. Platform roles remain enforced
+/// through User.platformRole; the PLATFORM row exists to make the access model
+/// visible and auditable, not to grant platform access.
+model Role {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  key         String    @unique
+  name        String    @unique
+  description String?
+  scope       String    @default("CLUB")
+  permissions String[]
+  isSystem    Boolean   @default(false)
+  isProtected Boolean   @default(false)
+  version     Int       @default(1)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  memberships ClubMembership[]
+
+  @@index([scope, archivedAt])
 }
 
 model ClubInvitation {
@@ -211,6 +236,7 @@ model PlaySession {
   format             String
   registrationPolicy String
   checkInPolicy      String
+  guestJoinPolicy    String    @default("DISABLED")
   published          Boolean   @default(false)
   allowLateArrivals  Boolean   @default(true)
   matchmakingConfig  Json
@@ -280,18 +306,22 @@ model SessionRegistration {
 }
 
 model SessionGuest {
-  id          String    @id @default(auto()) @map("_id") @db.ObjectId
-  sessionId   String    @db.ObjectId
-  clubId      String    @db.ObjectId
-  displayName String
-  gender      String
-  skillRating Float
-  status      String    @default("ACTIVE")
-  version     Int       @default(1)
-  createdById String    @db.ObjectId
-  removedAt   DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id                   String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId            String    @db.ObjectId
+  clubId               String    @db.ObjectId
+  displayName          String
+  gender               String
+  skillRating          Float
+  status               String    @default("ACTIVE")
+  origin               String    @default("MANAGER")
+  clientKeyHash        String?
+  guestAccessTokenHash String?
+  guestAccessExpiresAt DateTime?
+  version              Int       @default(1)
+  createdById          String    @db.ObjectId
+  removedAt            DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   session           PlaySession        @relation(fields: [sessionId], references: [id])
   club              Club               @relation(fields: [clubId], references: [id])
@@ -300,6 +330,8 @@ model SessionGuest {
   matchParticipants MatchParticipant[]
 
   @@index([sessionId, status, displayName])
+  @@index([sessionId, clientKeyHash])
+  @@index([guestAccessTokenHash])
   @@index([clubId, createdAt])
   @@index([createdById, createdAt])
 }
@@ -638,14 +670,14 @@ model AccountClaimToken {
 }
 
 model AccountRecoveryToken {
-  id         String    @id @default(auto()) @map("_id") @db.ObjectId
-  userId     String    @db.ObjectId
-  tokenHash  String    @unique
-  expiresAt  DateTime
-  consumedAt DateTime?
-  revokedAt  DateTime?
-  createdById String?  @db.ObjectId
-  createdAt  DateTime  @default(now())
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String    @db.ObjectId
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  revokedAt   DateTime?
+  createdById String?   @db.ObjectId
+  createdAt   DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -685,5 +717,3 @@ model PlatformLock {
   version   Int      @default(0)
   updatedAt DateTime @updatedAt
 }
-
-

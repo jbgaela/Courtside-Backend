@@ -4,18 +4,24 @@ import { sendData } from '../http/respond.js';
 import { param } from '../http/params.js';
 import { requireSuperAdmin, requireDestructiveAdminReauth, superAdminOnly } from './access.js';
 import {
+  adminAuditQuerySchema,
   approvalSchema,
+  assignRoleSchema,
   createAdminUserSchema,
+  createRoleSchema,
+  membershipParamsSchema,
   recoveryRequestSchema,
   registrationListQuerySchema,
   rejectionSchema,
   reopenSchema,
   reviewParamsSchema,
+  roleListQuerySchema,
+  roleParamsSchema,
   suspendUserSchema,
   updateAdminUserSchema,
+  updateRoleSchema,
   userListQuerySchema,
   userParamsSchema,
-  adminAuditQuerySchema,
 } from './schemas.js';
 import { validateBody, validateParams, validateQuery } from '../http/validate.js';
 import {
@@ -41,6 +47,19 @@ import {
   suspendUser,
   updateUser,
 } from './users.js';
+import {
+  archiveRole,
+  assignRole,
+  createRole,
+  duplicateRole,
+  getPermissionCatalog,
+  getPermissionMatrix,
+  getRoleDetail,
+  getRolesForUser,
+  listRoles,
+  removeRoleAssignment,
+  updateRole,
+} from './roles.js';
 
 export const adminRouter: ExpressRouter = Router();
 
@@ -264,6 +283,104 @@ adminRouter.post(
     requireDestructiveAdminReauth(req);
     const auth = requireSuperAdmin(req);
     sendData(res, await revokeUserSessions(auth.user.id, param(req, 'userId'), req));
+  }),
+);
+
+adminRouter.get(
+  '/roles/catalog',
+  asyncHandler(async (_req, res) => {
+    sendData(res, await getPermissionCatalog());
+  }),
+);
+
+adminRouter.get(
+  '/roles/matrix',
+  asyncHandler(async (_req, res) => {
+    sendData(res, await getPermissionMatrix());
+  }),
+);
+
+adminRouter.get(
+  '/roles',
+  validateQuery(roleListQuerySchema),
+  asyncHandler(async (req, res) => {
+    const query = req.validatedQuery as { q?: string; scope?: string };
+    sendData(res, await listRoles(query));
+  }),
+);
+
+adminRouter.post(
+  '/roles',
+  validateBody(createRoleSchema),
+  asyncHandler(async (req, res) => {
+    const auth = requireSuperAdmin(req);
+    sendData(res, await createRole(req.body, auth.user.id, req), 201);
+  }),
+);
+
+adminRouter.get(
+  '/roles/:roleId',
+  validateParams(roleParamsSchema),
+  asyncHandler(async (req, res) => {
+    sendData(res, await getRoleDetail(param(req, 'roleId')));
+  }),
+);
+
+adminRouter.patch(
+  '/roles/:roleId',
+  validateParams(roleParamsSchema),
+  validateBody(updateRoleSchema),
+  asyncHandler(async (req, res) => {
+    requireDestructiveAdminReauth(req);
+    const auth = requireSuperAdmin(req);
+    sendData(res, await updateRole(param(req, 'roleId'), req.body, auth.user.id, req));
+  }),
+);
+
+adminRouter.post(
+  '/roles/:roleId/duplicate',
+  validateParams(roleParamsSchema),
+  asyncHandler(async (req, res) => {
+    const auth = requireSuperAdmin(req);
+    sendData(res, await duplicateRole(param(req, 'roleId'), auth.user.id, req), 201);
+  }),
+);
+
+adminRouter.delete(
+  '/roles/:roleId',
+  validateParams(roleParamsSchema),
+  asyncHandler(async (req, res) => {
+    requireDestructiveAdminReauth(req);
+    const auth = requireSuperAdmin(req);
+    sendData(res, await archiveRole(param(req, 'roleId'), auth.user.id, req));
+  }),
+);
+
+adminRouter.get(
+  '/users/:userId/club-roles',
+  validateParams(userParamsSchema),
+  asyncHandler(async (req, res) => {
+    sendData(res, await getRolesForUser(param(req, 'userId')));
+  }),
+);
+
+adminRouter.post(
+  '/roles/assign',
+  validateBody(assignRoleSchema),
+  asyncHandler(async (req, res) => {
+    requireDestructiveAdminReauth(req);
+    const auth = requireSuperAdmin(req);
+    sendData(res, await assignRole(req.body, auth.user.id, req), 201);
+  }),
+);
+
+adminRouter.delete(
+  '/roles/assignments/:membershipId',
+  validateParams(membershipParamsSchema),
+  asyncHandler(async (req, res) => {
+    requireDestructiveAdminReauth(req);
+    const auth = requireSuperAdmin(req);
+    sendData(res, await removeRoleAssignment(param(req, 'membershipId'), auth.user.id, req));
   }),
 );
 
